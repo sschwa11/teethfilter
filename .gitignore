@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+recordings/
+Claude outputs/
+ai_data/
+ai_preview/
+lab/cache/
+lab/out/
+*.mp4
+face_landmarker.task
+teeth_ai*.onnx
+settings.json
+last_camera.txt

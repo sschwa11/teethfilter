@@ -1,0 +1,6 @@
+mediapipe>=0.10.14
+opencv-python>=4.9
+numpy>=1.26
+pygrabber>=0.2; sys_platform == "win32"
+onnxruntime-directml>=1.17; sys_platform == "win32"
+onnxruntime>=1.17; sys_platform != "win32"
