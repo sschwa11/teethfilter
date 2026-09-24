@@ -6,6 +6,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "teeth_model.npz")
 SEG_PATH = os.path.join(HERE, "teeth_seg.onnx")
+STATE_PATH = os.path.join(HERE, "teeth_memory.npz")
 CW, CH = 320, 260
 SEG_ROWS = (2, 258)
 GY, GX = np.mgrid[0:CH, 0:CW].astype(np.float32)
@@ -191,10 +192,10 @@ def smooth_cols(v, k=5):
 
 
 class AnchorFill:
-    def __init__(self, model_path=MODEL_PATH, seg_path=SEG_PATH, offset=None):
+    def __init__(self, model_path=MODEL_PATH, seg_path=SEG_PATH, offset=None, axis_shift=0.0):
         z = np.load(model_path)
         self.df = DentalFrame(z["ref_shape"].astype(np.float64), z["rigid_idx"])
-        self.x_mid = float(z["x_mid"])
+        self.x_mid = float(z["x_mid"]) + axis_shift
         self.bottom = z["bottom"].astype(np.float32)
         self.slot = z["slot"].astype(np.float32) * np.clip((GX - (float(z["x_mid"]) - 66.0)) / 10.0, 0, 1)
         self.donor_mask = z["donor_mask"] > 0.5
@@ -202,17 +203,28 @@ class AnchorFill:
         mir = np.interp(2 * self.x_mid - xs, xs, self.bottom, left=0, right=0)
         full = np.where(xs < self.x_mid, mir, self.bottom)
         good = full > 0
-        self.bottom_full = np.interp(xs, xs[good], full[good]).astype(np.float32)
+        self.bottom_full = smooth_cols(np.interp(xs, xs[good], full[good]), 5).astype(np.float32)
         self.body_top = np.argmax(self.slot > 0.5, 0)
+        ys, xs = np.nonzero(self.slot > 0.05)
+        self.roi = (max(int(ys.min()) - 2, 0), min(int(ys.max()) + 4, CH), max(int(xs.min()) - 2, 0), min(int(np.ceil(self.x_mid)) + 7, CW))
+        band = (np.abs(GX - self.x_mid) <= 5) & (GY >= self.roi[0]) & (GY < self.roi[1])
+        self.slot_lim = (self.slot > 0.05) | band
         self.xd_map = np.ascontiguousarray(np.broadcast_to((2 * self.x_mid - GX[0])[None, :], (CH, CW))).astype(np.float32)
         self.seg = Segmenter(seg_path)
-        self.edge_x0 = self.x_mid + float(z["edge_offset"])
+        self.edge_x0 = float(z["x_mid"]) + float(z["edge_offset"])
         self.upper = True
         self.lower = True
         self.extend_px = 6.0
         self.bottom_margin = 1.0
         self.smooth = "crop"
         self.k_new = 0.7
+        self.k_reg = 0.35
+        self.stable = True
+        self.st_rate = 0.12
+        self.shade = False
+        self.gain_lo, self.gain_hi, self.gain_k = 0.4, 1.8, 0.7
+        self.rise_u = 1.0
+        self.seam_band = True
         self.debug = False
         self.dbg = None
         self.reset(offset)
@@ -230,6 +242,41 @@ class AnchorFill:
         self.alpha_prev = None
         self.alpha_l_prev = None
         self.last = None
+        self.mem = None
+        self.mem_w = None
+        self.mem_bot = None
+        self.au_prev = None
+        self.al_prev = None
+        self.lmem = None
+        self.l_hits = 0
+        self.prev_hp = None
+        self.prev_mouth = None
+        self.reg_ok = False
+        self.st_tex = None
+        self.st_seen = None
+        self.st_sil = None
+        self.st_gain = None
+        self.st_shade = None
+        self.st_gap = 99
+
+    def save_state(self, path=STATE_PATH):
+        if self.st_tex is None or (self.st_seen > 0.3).sum() < 200:
+            return False
+        np.savez_compressed(path, st_tex=self.st_tex.astype(np.float16), st_seen=self.st_seen.astype(np.float16),
+                            st_sil=self.st_sil.astype(np.float16), roi=np.array(self.roi))
+        return True
+
+    def load_state(self, path=STATE_PATH):
+        if not os.path.exists(path):
+            return False
+        z = np.load(path)
+        if tuple(int(v) for v in z["roi"]) != tuple(self.roi):
+            return False
+        self.st_tex = z["st_tex"].astype(np.float32)
+        self.st_seen = np.minimum(z["st_seen"].astype(np.float32), 0.6)
+        self.st_sil = z["st_sil"].astype(np.float32)
+        self.st_gain = np.ones(3, np.float32)
+        return True
 
     @property
     def offset(self):
@@ -246,10 +293,48 @@ class AnchorFill:
             m = m * cv2.dilate((labels == keep).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(np.float32)
         return m
 
+    def register(self, hp, mouth0):
+        if self.prev_hp is None or self.delta is None:
+            return None
+        loc = np.array([self.et.x0, self.et.b0]) + self.delta
+        x0 = int(round(loc[0])) - 50
+        x1 = int(round(loc[0])) + 50
+        y1 = int(round(loc[1])) + 2
+        y0 = y1 - 30
+        p = 4
+        if x0 - p < 0 or x1 + p > CW or y0 - p < 0 or y1 + p > CH:
+            return None
+        m = (self.prev_mouth[y0:y1, x0:x1] > 0.7) & (mouth0[y0:y1, x0:x1] > 0.7)
+        pl = self.prev_L[y0:y1, x0:x1]
+        if m.sum() > 60:
+            m &= pl > np.percentile(pl[m], 40)
+        m = m.astype(np.float32)
+        if m.sum() < 120:
+            return None
+        tpl = self.prev_hp[y0:y1, x0:x1]
+        if tpl[m > 0].std() < 3.0:
+            return None
+        win = hp[y0 - p:y1 + p, x0 - p:x1 + p]
+        r = cv2.matchTemplate(win, tpl, cv2.TM_CCORR_NORMED, mask=m)
+        r = np.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
+        _, mv, _, ml = cv2.minMaxLoc(r)
+        if mv < 0.6:
+            return None
+        px, py = ml
+        if px in (0, r.shape[1] - 1) or py in (0, r.shape[0] - 1):
+            return None
+        return np.array([px + parabolic(r[py], px) - p, py + parabolic(r[:, px], py) - p])
+
     def anchor(self, a0, L0, mouth0):
+        hp = L0 - cv2.GaussianBlur(L0, (0, 0), 3.0)
+        shift = self.register(hp, mouth0)
+        self.prev_hp, self.prev_mouth, self.prev_L = hp, mouth0, L0
         meas = self.et.measure(L0, mouth0)
         base = np.array([self.et.x0, self.et.b0])
-        ref = self.delta if (self.delta is not None and self.miss < 30) else self.et.off
+        pred = None
+        if self.delta is not None:
+            pred = self.delta + shift if shift is not None else self.delta.copy()
+        ref = pred if (pred is not None and (self.miss < 30 or shift is not None)) else self.et.off
         good = False
         if meas is not None and meas["conf"] >= 0.06:
             yo = self.et.off[1]
@@ -267,57 +352,249 @@ class AnchorFill:
                 good = len(self.outliers) >= 3 and np.ptp(self.outliers[-3:]) < 4
             if good:
                 self.outliers = []
+        self.reg_ok = shift is not None
         if good:
             self.et.update(meas)
-            loc = base + d_m
             self.miss = 0
             self.locks += 1
+            if pred is None:
+                self.delta = d_m
+            else:
+                k = self.k_reg if shift is not None else self.k_new
+                self.delta = k * d_m + (1 - k) * pred
         else:
-            loc = base + (self.delta if self.delta is not None else self.et.off)
             self.miss += 1
-            if self.miss > 8:
-                loc = loc + 0.05 * ((base + self.et.off) - loc)
-        if self.smooth == "image":
-            p = a0[:, :2] @ loc + a0[:, 2]
-            if not good:
-                self.filt.reset(p)
-            pf = self.filt(p)
-            inv = np.linalg.inv(np.vstack([a0, [0, 0, 1]]))
-            self.delta = inv[:2, :2] @ pf + inv[:2, 2] - base
+            if pred is None:
+                self.delta = self.et.off.copy()
+            else:
+                self.delta = pred
+                if shift is None and self.miss > 8:
+                    self.delta = self.delta + 0.05 * (self.et.off - self.delta)
+
+    def hold(self, raw, prev, limit, rise=0.6, fall=0.34):
+        if prev is None:
+            a = raw * rise
         else:
-            new = loc - base
-            if good and self.delta is not None and self.miss == 0:
-                new = self.k_new * new + (1 - self.k_new) * self.delta
-            self.delta = new
+            a = prev + np.clip(raw - prev, -fall, rise)
+        a = np.minimum(a, limit).astype(np.float32)
+        return a, a
 
     def upper_fill(self, crop, L, mouth):
-        body = self.slot
-        mouth_d = cv2.remap(mouth, self.xd_map, GY, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        L_d = cv2.remap(L, self.xd_map, GY, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-        vis_d = (mouth_d > 0.65) & (body > 0.5)
+        r0, r1, c0, c1 = self.roi
+        R = (slice(r0, r1), slice(c0, c1))
+        h = r1 - r0
+        body = self.slot[R]
+        inb = body > 0.5
+        gy = GY[R]
+        rows = np.arange(r0, r1, dtype=np.float32)[:, None]
+        lc = np.arange(c1 - c0)
+        xm = self.xd_map[R]
+        mouth_d = cv2.remap(mouth, xm, gy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        L_d = cv2.remap(L, xm, gy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        live = cv2.remap(crop, xm, gy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        vis_d = (mouth_d > 0.65) & inb
         has = vis_d.any(0)
-        top_d = np.maximum(np.where(has, np.argmax(vis_d, 0), CH), self.body_top).astype(np.float32)
-        tooth = vis_d & (body > 0.5)
-        lt = float(np.percentile(L_d[tooth], 75)) if tooth.sum() > 20 else 0.0
-        bright = tooth & (L_d > 0.62 * lt)
-        rows = np.arange(CH)[:, None]
-        cap = self.bottom_full + self.bottom_margin
-        lowb = bright & (rows >= top_d[None, :]) & (rows <= cap[None, :])
-        last_b = np.where(lowb.any(0), CH - 1 - np.argmax(lowb[::-1], 0) + 1.0, top_d).astype(np.float32)
-        bot = np.minimum(last_b, cap)
+        top_d = np.maximum(np.where(has, r0 + np.argmax(vis_d, 0), CH), self.body_top[c0:c1]).astype(np.float32)
+        lt = float(np.percentile(L_d[vis_d], 75)) if vis_d.sum() > 20 else 0.0
+        bright = vis_d & (L_d > 0.62 * lt)
+        bf = self.bottom_full[c0:c1]
+        cap = bf + self.bottom_margin
+        start = np.maximum(top_d + 2, bf - 10)
+        at_start = bright[np.clip(start - r0, 0, h - 1).astype(np.int32), lc]
+        below = (rows >= start[None, :]) & ~bright
+        first_dark = np.where(below.any(0), r0 + np.argmax(below, 0), CH).astype(np.float32)
+        above = bright & (rows <= start[None, :]) & (rows >= top_d[None, :])
+        last_up = np.where(above.any(0), r0 + h - np.argmax(above[::-1], 0), top_d).astype(np.float32)
+        bot = np.minimum(np.where(at_start, first_dark, last_up), cap)
         sel = np.flatnonzero(has)
         if sel.size >= 5:
             b = cv2.dilate(bot[sel].astype(np.float32).reshape(1, -1), np.ones((1, 9), np.uint8)).ravel()
-            bot[sel] = np.minimum(smooth_cols(b, 5), self.bottom_full[sel] + self.bottom_margin)
-        top_b = np.where(bright.any(0), np.argmax(bright, 0), top_d).astype(np.float32)
-        top_b = np.clip(top_b, top_d, top_d + 6)
-        mapy = np.maximum(GY, (top_b + 1.0)[None, :]).astype(np.float32)
-        tex = cv2.remap(crop, self.xd_map, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
-        alpha = body * np.clip((mouth - 0.3) / 0.4, 0, 1)
-        alpha *= np.clip(bot[None, :] + 0.5 - GY, 0, 1)
-        alpha *= np.clip((GY - (top_d[None, :] - self.extend_px)) / 3.0, 0, 1)
-        alpha *= (has & (bot > top_d + 2))[None, :]
-        return tex, cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), 0.7)
+            bot[sel] = np.minimum(smooth_cols(b, 5), cap[sel])
+        live_ok = has & (bot > top_d + 2)
+        if self.stable:
+            vis_s = (mouth_d > 0.75) & inb
+            self.stable_update(live, vis_s, vis_s & (L_d > 0.62 * lt) if lt > 0 else np.zeros_like(vis_s))
+            st = self.stable_render(rows, gy, body, cap)
+            if st is not None:
+                tex, cover, has_st = st
+                mt = self.extend_dark(mouth[R], L[R], lt, inb)
+                self.mouth_t = mouth.copy()
+                self.mouth_t[R] = mt
+                alpha = body * np.clip((mt - 0.3) / 0.4, 0, 1) * cover
+                tex, alpha = self.heal_seam(crop[R], tex, alpha, lt, self.x_mid - c0)
+                tex = np.where((alpha > 0)[..., None], tex, crop[R].astype(np.float32))
+                tex_full = crop.astype(np.float32)
+                tex_full[R] = tex
+                alpha_full = np.zeros((CH, CW), np.float32)
+                alpha_full[R] = cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), 0.7)
+                return tex_full, alpha_full
+        mem_ok = self.update_memory(live, mouth_d, vis_d, top_d, bot, live_ok, rows)
+        top_b = np.clip(np.where(bright.any(0), r0 + np.argmax(bright, 0), top_d), top_d, top_d + 6).astype(np.float32)
+        live_src = (rows >= top_b[None, :]) & live_ok[None, :]
+        use_mem = ~live_src & mem_ok
+        src_ok = live_src | use_mem
+        tex = np.where(use_mem[..., None], self.mem, live)
+        has_src = src_ok.any(0)
+        t_src = np.where(has_src, r0 + np.argmax(src_ok, 0), CH).astype(np.int32)
+        samp = np.stack([tex[np.clip(t_src + k - r0, 0, h - 1), lc] for k in (3, 4, 5, 6)])
+        top_px = np.median(samp, 0).astype(np.float32)
+        top_px = cv2.GaussianBlur(top_px.reshape(1, -1, 3), (0, 0), sigmaX=2.0, sigmaY=0.1).reshape(-1, 3)
+        dist = np.clip((t_src[None, :] - gy) / 14.0, 0, 1)
+        ext = top_px[None, :, :] * (1 - 0.22 * dist)[..., None]
+        need_ext = (rows < t_src[None, :]) & has_src[None, :]
+        tex = np.where(need_ext[..., None], ext, tex).astype(np.float32)
+        bot_eff = np.where(live_ok, bot, np.where(np.isnan(self.mem_bot), 0, self.mem_bot)).astype(np.float32)
+        mt = self.extend_dark(mouth[R], L[R], lt, inb)
+        self.mouth_t = mouth.copy()
+        self.mouth_t[R] = mt
+        alpha = body * np.clip((mt - 0.3) / 0.4, 0, 1) * np.clip(bot_eff[None, :] + 0.5 - gy, 0, 1)
+        alpha *= (has_src & (bot_eff > t_src + 2))[None, :]
+        tex, alpha = self.heal_seam(crop[R], tex, alpha, lt, self.x_mid - c0)
+        tex_full = crop.astype(np.float32)
+        tex_full[R] = tex
+        alpha_full = np.zeros((CH, CW), np.float32)
+        alpha_full[R] = cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), 0.7)
+        return tex_full, alpha_full
+
+    def stable_update(self, live, vis, tooth_now):
+        if self.st_tex is None:
+            self.st_tex = live.copy()
+            self.st_seen = np.zeros(live.shape[:2], np.float32)
+            self.st_sil = np.zeros(live.shape[:2], np.float32)
+            self.st_gain = np.ones(3, np.float32)
+        both = vis & tooth_now & (self.st_seen > 0.5)
+        if both.sum() > 40:
+            g = np.array([np.median(live[..., c][both] / np.maximum(self.st_tex[..., c][both], 1.0)) for c in range(3)], np.float32)
+            g = np.clip(g, self.gain_lo, self.gain_hi)
+            k = 1.0 if self.st_gap > 2 else self.gain_k
+            self.st_gain = ((1 - k) * self.st_gain + k * g).astype(np.float32)
+            self.st_gap = 0
+        else:
+            self.st_gap += 1
+        if self.shade:
+            self.shade_update(live, vis & (self.st_seen > 0.5) & (self.st_sil > 0.5))
+        if vis.sum() > 20:
+            norm = live / self.st_gain[None, None, :]
+            a = np.where(self.st_seen <= 0.01, 1.0, self.st_rate)[..., None]
+            upd = tooth_now | (vis & (self.st_seen <= 0.01))
+            self.st_tex = np.where(upd[..., None], (1 - a) * self.st_tex + a * norm, self.st_tex).astype(np.float32)
+            self.st_seen = np.where(vis, self.st_seen + 0.25 * (1 - self.st_seen), self.st_seen).astype(np.float32)
+            self.st_sil = np.where(vis, self.st_sil + 0.2 * (tooth_now.astype(np.float32) - self.st_sil), self.st_sil).astype(np.float32)
+
+    def shade_update(self, live, both):
+        if self.st_shade is None:
+            self.st_shade = np.ones(live.shape[:2], np.float32)
+        if both.sum() <= 40:
+            self.st_shade = (0.8 * self.st_shade + 0.2).astype(np.float32)
+            return
+        w = both.astype(np.float32)
+        ratio = live.mean(2) / np.maximum((self.st_tex * self.st_gain[None, None, :]).mean(2), 1.0)
+        num = cv2.GaussianBlur(np.clip(ratio, 0.25, 1.5) * w, (0, 0), 6.0)
+        den = cv2.GaussianBlur(w, (0, 0), 6.0)
+        conf = np.clip(den / 0.2, 0, 1)
+        new = 1 + (num / np.maximum(den, 1e-6) - 1) * conf
+        self.st_shade = (0.5 * self.st_shade + 0.5 * np.clip(new, 0.35, 1.3)).astype(np.float32)
+
+    def stable_render(self, rows, gy, body, cap):
+        h = rows.shape[0]
+        r0 = int(rows[0, 0])
+        known = self.st_seen > 0.3
+        tooth = known & (self.st_sil > 0.5)
+        tooth = cv2.morphologyEx(tooth.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 3), np.uint8)) > 0
+        has = tooth.any(0)
+        if has.sum() < 15:
+            return None
+        top = np.where(has, r0 + np.argmax(tooth, 0), CH).astype(np.float32)
+        bot = np.where(has, r0 + h - np.argmax(tooth[::-1], 0), 0).astype(np.float32)
+        sel = np.flatnonzero(has)
+        b = cv2.dilate(bot[sel].reshape(1, -1), np.ones((1, 9), np.uint8)).ravel()
+        bot[sel] = np.minimum(smooth_cols(b, 5), cap[sel])
+        t = -cv2.dilate(-top[sel].reshape(1, -1), np.ones((1, 9), np.uint8)).ravel()
+        top[sel] = smooth_cols(t, 5)
+        tex = self.st_tex * self.st_gain[None, None, :]
+        if self.shade and self.st_shade is not None:
+            tex = tex * self.st_shade[..., None]
+        lc = np.arange(tex.shape[1])
+        ti = np.clip(top.astype(np.int32) - r0, 0, h - 1)
+        samp = np.stack([tex[np.clip(ti + k, 0, h - 1), lc] for k in (2, 3, 4, 5)])
+        top_px = cv2.GaussianBlur(np.median(samp, 0).astype(np.float32).reshape(1, -1, 3), (0, 0), sigmaX=2.0, sigmaY=0.1).reshape(-1, 3)
+        dist = np.clip((top[None, :] - gy) / 14.0, 0, 1)
+        need = (rows < top[None, :] + 2) & has[None, :]
+        ext = top_px[None, :, :] * (1 - 0.22 * dist)[..., None]
+        blend = np.clip((top[None, :] + 2 - rows) / 3.0, 0, 1)[..., None] * need[..., None]
+        tex = (tex * (1 - blend) + ext * blend).astype(np.float32)
+        cover = has[None, :] & (rows <= bot[None, :])
+        return tex, cover.astype(np.float32) * np.clip(bot[None, :] + 0.5 - gy, 0, 1), has
+
+    def extend_dark(self, mouth, L, lt, inb, reach=12):
+        if lt <= 0:
+            return mouth.copy()
+        hh, ww = mouth.shape
+        conf = (mouth > 0.5) & inb
+        has = conf.sum(0) >= 4
+        top = np.where(has, np.argmax(conf, 0), hh)
+        dark = L < 0.55 * lt
+        out = mouth.copy()
+        alive = has.copy()
+        cols = np.arange(ww)
+        n_ext = np.zeros(ww, np.int32)
+        for k in range(1, reach + 1):
+            r = top - k
+            ok = alive & (r >= 0)
+            rr = np.clip(r, 0, hh - 1)
+            ok &= dark[rr, cols] & inb[rr, cols]
+            n_ext[ok] = k
+            alive = ok
+        ext_cols = n_ext > 0
+        if ext_cols.any():
+            rows = np.arange(hh)[:, None]
+            fill = ext_cols[None, :] & (rows >= (top - n_ext)[None, :]) & (rows <= (top + 6)[None, :])
+            out = np.where(fill, np.maximum(out, 0.9), out).astype(np.float32)
+        return out
+
+    def update_memory(self, live, mouth_d, vis_d, top_d, bot, live_ok, rows):
+        crown = vis_d & (mouth_d > 0.8) & (rows >= top_d[None, :]) & (rows < bot[None, :]) & live_ok[None, :]
+        if self.mem is None:
+            self.mem = live.copy()
+            self.mem_w = np.zeros(live.shape[:2], np.float32)
+            self.mem_bot = np.full(live.shape[1], np.nan, np.float32)
+        both = crown & (self.mem_w > 0.5)
+        if both.sum() > 40:
+            g = np.array([np.median(live[..., c][both] / np.maximum(self.mem[..., c][both], 1.0)) for c in range(3)], np.float32)
+            self.mem *= np.clip(g, 0.85, 1.18)[None, None, :]
+        if crown.sum() > 30:
+            fresh = crown & (self.mem_w <= 0.05)
+            self.mem = np.where(fresh[..., None], live, np.where(crown[..., None], 0.5 * self.mem + 0.5 * live, self.mem)).astype(np.float32)
+            self.mem_w = np.where(crown, 1.0, self.mem_w * 0.997).astype(np.float32)
+            cols = live_ok & (bot > top_d + 4)
+            prev = self.mem_bot
+            self.mem_bot = np.where(cols, np.where(np.isnan(prev), bot, 0.7 * prev + 0.3 * bot), prev).astype(np.float32)
+        else:
+            self.mem_w *= 0.997
+        return (self.mem_w > 0.35) & (rows < np.nan_to_num(self.mem_bot, nan=0)[None, :])
+
+    def heal_seam(self, crop, tex, alpha, lt, axis):
+        a = int(round(axis))
+        x0, x1 = a - 4, a + 5
+        if x0 < 0 or x1 >= crop.shape[1] or lt <= 0:
+            return tex, alpha
+        comp = crop[:, x0:x1].astype(np.float32) * (1 - alpha[:, x0:x1, None]) + tex[:, x0:x1] * alpha[:, x0:x1, None]
+        left, right = comp[:, 0], comp[:, -1]
+        lum = comp.mean(2)
+        ok = (alpha[:, x0 + 1] > 0.5) & (left.mean(1) > 0.55 * lt) & (right.mean(1) > 0.55 * lt)
+        if not ok.any():
+            return tex, alpha
+        xs = np.arange(x0, x1, dtype=np.float32)
+        w = (xs - x0) / (x1 - 1 - x0)
+        lin = left[:, None, :] * (1 - w)[None, :, None] + right[:, None, :] * w[None, :, None]
+        target = lin * (1 - 0.2 * np.exp(-((xs - axis) / 0.9) ** 2))[None, :, None]
+        k = np.clip((target.mean(2) - lum) / 15.0, 0, 1)[..., None]
+        healed = comp + (target - comp) * k
+        tex = tex.copy()
+        alpha = alpha.copy()
+        tex[ok, x0:x1] = healed[ok]
+        alpha[ok, x0:x1] = np.maximum(alpha[ok, x0:x1], alpha[ok, x0 + 1:x0 + 2])
+        return tex, alpha
 
     def lower_fill(self, crop, L, mouth, span=64):
         xm = self.x_mid
@@ -326,10 +603,12 @@ class AnchorFill:
         vis_ref = self.donor_mask & (mouth > 0.7)
         low_reg = inm[:, cols] & (np.arange(CH)[:, None] > self.bottom_full[cols][None, :] + 1)
         if vis_ref.sum() >= 20:
-            thr = 0.72 * float(np.percentile(L[vis_ref], 70))
+            lt = float(np.percentile(L[vis_ref], 70))
+            thr = 0.72 * lt
         elif low_reg.sum() >= 60:
             vals = L[:, cols][low_reg]
             thr = 0.5 * (float(np.percentile(vals, 92)) + float(np.percentile(vals, 30)))
+            lt = float(np.percentile(vals, 92))
         else:
             return None
         has = inm[:, cols].any(0)
@@ -368,6 +647,10 @@ class AnchorFill:
         alpha = np.clip((GY - low[None, :]) / 1.5, 0, 1) * np.clip((mouth - 0.15) / 0.3, 0, 1) * (valid * taper)[None, :]
         mapy = np.minimum(GY, np.nan_to_num(b_s, nan=CH)[None, :]).astype(np.float32)
         tex = cv2.remap(crop, self.xd_map, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        if self.seam_band:
+            t2, a2 = self.heal_seam(crop[:, ::-1], tex[:, ::-1], alpha[:, ::-1].astype(np.float32), lt, CW - 1 - xm)
+            tex, alpha = t2[:, ::-1], a2[:, ::-1]
+            tex = np.where((alpha > 0)[..., None], tex, crop.astype(np.float32))
         return tex, cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), 0.8)
 
     def process(self, frame, pts):
@@ -386,34 +669,50 @@ class AnchorFill:
         cp = cp0 - self.delta
         yu = np.interp(np.arange(CW), *zip(*sorted(cp[UPPER_INNER].tolist())))
         yl = np.interp(np.arange(CW), *zip(*sorted(cp[LOWER_INNER].tolist())))
-        xm = int(self.x_mid)
-        opening = float(np.median((yl - yu)[xm - 40:xm + 40]))
-        gate = float(np.clip((opening - 2) / 5, 0, 1)) * float(np.clip(self.locks / 3.0, 0, 1))
+        gate = float(np.clip(self.locks / 3.0, 0, 1))
+        mclip = np.clip((mouth - 0.3) / 0.4, 0, 1)
+        L = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32), (0, 0), 0.7)
         tex = crop.astype(np.float32)
         alpha = np.zeros((CH, CW), np.float32)
-        L = cv2.GaussianBlur(cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32), (0, 0), 0.7)
+        alpha_u = alpha
+        alpha_l = alpha
         if self.upper and gate > 0:
-            tex, alpha = self.upper_fill(crop, L, mouth)
-            alpha *= gate
-            if self.alpha_prev is not None:
-                alpha = np.maximum(alpha, 0.35 * self.alpha_prev * (mouth > 0.5))
-        self.alpha_prev = alpha if self.upper else None
+            tex_u, raw_u = self.upper_fill(crop, L, mouth)
+            lim_slot = self.slot_lim if self.seam_band else (self.slot > 0.05)
+            alpha_u, self.au_prev = self.hold(raw_u * gate, self.au_prev, np.clip((self.mouth_t - 0.3) / 0.4, 0, 1) * lim_slot, rise=self.rise_u)
+            if self.mem is not None and not self.stable:
+                r0, r1, c0, c1 = self.roi
+                held = (alpha_u[r0:r1, c0:c1] > raw_u[r0:r1, c0:c1] + 0.05) & (self.mem_w > 0.35)
+                tex_u[r0:r1, c0:c1] = np.where(held[..., None], self.mem, tex_u[r0:r1, c0:c1])
+            tex, alpha = tex_u, alpha_u
+        else:
+            self.au_prev = None
         if self.lower and gate > 0:
             lf = self.lower_fill(crop, L, mouth)
+            raw_l = np.zeros((CH, CW), np.float32)
             if lf is not None:
-                tex_l, alpha_l = lf
-                alpha_l *= gate
-                if self.alpha_l_prev is not None:
-                    alpha_l = 0.6 * alpha_l + 0.4 * self.alpha_l_prev * (mouth > 0.5)
-                self.alpha_l_prev = alpha_l
-                use_l = alpha_l > alpha
-                tex = np.where(use_l[..., None], tex_l, tex)
-                alpha = np.maximum(alpha, alpha_l)
+                tex_l, raw_l = lf
+                self.l_hits += 1
+                if self.lmem is None:
+                    self.lmem = tex_l.copy()
+                upd = raw_l > 0.5
+                self.lmem[upd] = tex_l[upd]
             else:
-                self.alpha_l_prev = None
+                self.l_hits = 0
+                tex_l = self.lmem if self.lmem is not None else tex
+            if self.l_hits < 2:
+                raw_l = raw_l * 0.0
+            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, mclip)
+            if self.lmem is not None:
+                tex_l = np.where((alpha_l > raw_l + 0.05)[..., None], self.lmem, tex_l)
+            use_l = alpha_l > alpha
+            tex = np.where(use_l[..., None], tex_l, tex)
+            alpha = np.maximum(alpha, alpha_l)
+        else:
+            self.al_prev = None
         self.last = (a, alpha)
         if self.debug:
-            self.dbg = {"crop": crop, "mouth": mouth, "alpha": alpha, "tex": tex, "delta": self.delta.copy(), "miss": self.miss, "locks": self.locks, "gate": gate}
+            self.dbg = {"crop": crop, "mouth": mouth, "alpha": alpha, "tex": tex, "delta": self.delta.copy(), "miss": self.miss, "locks": self.locks, "gate": gate, "alpha_u": alpha_u, "alpha_l": alpha_l}
         if alpha.max() < 0.01:
             return frame, None
         return self.paste(frame, pts, a, tex, alpha)

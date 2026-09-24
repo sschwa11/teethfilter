@@ -31,15 +31,22 @@ Test a recording offline: `run.bat --video recordings\<name>_raw.mp4 --out test.
 1. MediaPipe landmarks go through a rigid fit on skull-stable points (nose bridge area), which gives a **dental frame**: a 320x260 crop in which your upper teeth never move.
 2. An edge tracker finds the gap-side edge of your present upper central incisor in that crop and corrects MediaPipe's pose error (usually 3-5 px). The mirror axis sits just left of that edge.
 3. The segmenter gives the mouth opening, so lips always stay in front.
-4. **Upper fill:** each column in the missing slots (central + lateral) gets the live pixels from the mirrored column on the other side of the axis. It covers from just under your lip down to the mirrored tooth's own incisal edge.
+4. **Upper fill:** a *stable tooth model*. The mirrored image of your present central and lateral is accumulated over time: texture, silhouette, and a brightness gain matched to the current frame. The fill is drawn from that model instead of fresh pixels each frame, which is what removed most of the flicker. The lip matte decides what is visible. The model is saved to `teeth_memory.npz` on quit, so a new session starts with it.
 5. **Lower fill:** your healthy lower teeth (viewer's left) are mirrored onto the decayed ones (viewer's right), underneath the upper teeth.
-6. The result is warped back into the frame. There is no gap detection, so there's nothing to flicker.
+6. The seam where the fill meets your real tooth is healed on both arches, so it reads as a thin interproximal line instead of a dark crack.
+7. The fill appears instantly when the mouth opens and fades out over about 3 frames when it closes. Frame-to-frame image registration keeps the axis locked between tracker measurements.
+8. The result is warped back into the frame.
 
 Everything is in `dental.py`. Its tunables are attributes on `AnchorFill`:
 
 - `extend_px`: how far above the donor's visible tooth the fill may extend (default 6).
 - `bottom_margin`: overlap below the incisal edge (default 1).
 - `k_new`: tracking smoothing (0.7; higher follows faster).
+- `st_rate`: how fast the stable tooth texture adapts (0.12).
+- `gain_lo`/`gain_hi`/`gain_k`: brightness-matching limits and speed (0.4 / 1.8 / 0.7).
+- `rise_u`: how fast the upper fill appears (1.0 = instantly).
+- `seam_band`: seam healing on/off.
+- `stable = False` goes back to the per-frame live mirror (v13 behaviour).
 - `upper` / `lower`: which arches are filled.
 - The slot width is the `66.0` in `__init__`: 66 = central + lateral, 88 would include the canine.
 
@@ -54,14 +61,25 @@ Blind A/B judging used 4 AI judges on the same 40 frames from 6 clips; `lab/make
 | v11 (anchor, upper only) | 75% | 6.0 | 8% |
 | v13 (anchor, upper + lower, current) | 75% | 5.9 | 25%* |
 
+Flicker (v20-v23) was judged by 4 blind AI judges on 13 pairs of 8-consecutive-frame strips against your live-recorded v13 output (`lab/make_seq_judge.py`, `lab/score_seq.py`):
+
+| Version | Less flicker (new / v13 / tie) | Mean flicker 0-10 (new vs v13) |
+|---|---|---|
+| v20 stable tooth + registration | 17 / 12 / 23 | 2.62 vs 2.85 |
+| v22 + correct brightness gain, instant appear | 12 / 4 / 36 | 3.17 vs 3.35 |
+| v23 (current) + seam healing | 11 / 10 / 31 | 3.15 vs 3.06 |
+
+At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
+
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).
 
 Speed: ~28.5 fps with a 30 fps camera. Face tracking runs on its own thread (`Capture` in `teeth_filter.py`). MediaPipe takes ~22 ms, the fill ~17 ms, and they overlap.
 
 ## 4. Known problems, in priority order
 
+0. **Brief dark notch when the mouth first opens**, for 1 frame. This is the most common remaining flicker complaint. It happens while the tracker and lip matte catch up.
 1. **Drawn-looking dark outline along the incisal edges**, a symmetric "gull-wing" shape. The mirrored tooth brings its shadow line with it. Try soft-fading the bottom 1-2 px of the fill, or darkening less.
-2. **Midline line runs straight through both arches.** The upper and lower mirrors use the same axis. Offset the lower axis by 1-2 px, or soften the lower seam.
+2. The top edge of the fill against the lip can look slightly stepped.
 3. **Too-perfect symmetry** of the two centrals. A slight brightness or shape jitter on the mirrored copy would help.
 4. **Wide smiles:** the mirrored lateral can look grey or flat next to the bright lower teeth that show where your upper canine is missing.
 5. **Lower fill** occasionally leaves a bright, flat "slab" at the lower lip line (`lower_fill` in `dental.py`).

@@ -270,6 +270,7 @@ def save_settings(cfg, st, anchor=None):
     data = {k: round(float(getattr(cfg, k)), 3) for k in DEFAULTS}
     if anchor is not None and anchor.et.n >= 15:
         data["anchor_offset"] = [round(float(v), 2) for v in anchor.offset]
+        anchor.save_state()
     elif "_anchor" in st.prior:
         data["anchor_offset"] = st.prior["_anchor"]
     for k, arr in st.prior.items():
@@ -812,7 +813,8 @@ def make_anchor(cfg, priors):
         cfg.method = "edge"
         return None
     anchor = dental.AnchorFill(offset=priors.get("_anchor"))
-    print(f"Anchor fill ready (mouth segmenter on {anchor.seg.provider}).")
+    loaded = anchor.load_state()
+    print(f"Anchor fill ready (mouth segmenter on {anchor.seg.provider}){', tooth memory loaded' if loaded else ''}.")
     return anchor
 
 

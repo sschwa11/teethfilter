@@ -11,3 +11,4 @@ teeth_ai*.onnx
 settings.json
 last_camera.txt
 !recordings/*.mp4
+teeth_memory.npz
