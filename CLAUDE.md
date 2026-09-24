@@ -5,8 +5,24 @@ Real-time webcam filter that fills missing-tooth gaps so they don't show on vide
 ## Conventions
 - No comments in code.
 - Keep responses succinct; don't restate the question.
+- HANDOFF.md is the user-facing status/how-to; keep it in sync with major changes.
+- GitHub: private repo sschwa11/teethfilter (recordings included; .venv, lab/cache, lab/out, Claude outputs, ai_data ignored).
 
-## Pipeline (teeth_filter.py)
+## v10 anchor method (default, `--method anchor`, dental.py)
+Scott's dentition: upper right central + lateral missing (stubs at gumline), viewer's left of his present central; lower left anteriors decayed (viewer's right). Present: upper left central/lateral/canine, lower right incisors/canine.
+1. `DentalFrame`: Umeyama similarity fit of 3D landmarks (x*w, y*h, z*w; `detect` now returns 3D) on 70 skull-rigid indices to Scott's reference shape (both in teeth_model.npz) -> affine into a 320x260 "dental" crop (mouth ~200px) where upper teeth are static. Landmark-set choice barely matters; MediaPipe pose error is ~3-4 px and not predictable from pose/blendshapes/landmarks (tested).
+2. `Segmenter`: teeth_seg.onnx (U-Net w16, 1.2M params, 256x320 BGR uint8 in, mouth-opening prob out, ~3-4 ms DirectML), distilled from SegFormer-B5 (jonathandinu/face-parsing) + BiSeNet (79999_iter) "mouth" class. `clean_mouth` clamps it to the landmark lip polygon dilated 12px and keeps the largest component.
+3. `EdgeTracker`: finds the dark->bright mesial edge of the present upper central (plateau + gradient score, prior-weighted around the session offset), plus incisal edge y. `anchor()` gates measurements (conf, distance, re-lock after 3 consistent outliers) and smooths the correction in crop space (k_new=0.7). Do NOT smooth in image space: One-Euro on the image anchor lags head motion by 5-10 canonical px (measured).
+4. `upper_fill`: live mirror about x_mid (edge - 0.75) into the slot (central + lateral, x_mid-66 with taper). Alpha = slot x mouth x [donor visible top - extend_px, lowest bright donor row + bottom_margin]; embrasure columns bridged by a 9-px max filter. Extension replicates the first bright donor row (not the dark lip-shadow line).
+5. `lower_fill`: mirrors the healthy lower teeth (viewer's left) onto the right under the upper teeth; top edge from the mirrored lower teeth's own incisal edge; brightness reference from upper central or lower teeth. On by default (judged 89% win vs off).
+6. `paste`: warps tex/alpha back only over the alpha bbox.
+- Live loop: `Capture` thread does camera read + MediaPipe; main thread does fill/encode/display -> ~28.5 fps (MediaPipe 22 ms, fill ~17 ms).
+- settings.json `anchor_offset` stores the tracker session offset.
+- Evaluation (lab/): run_dental.py renders clips; make_judge_set.py + a blind judge workflow (4 AI judges, A/B) gave: v11 75% win vs raw, naturalness 6.0 vs 4.2, gap visible 8% vs 77%; v13 (with lower) 75% win. Known issues listed in HANDOFF.md section 4.
+- Rebuild pipeline: HANDOFF.md section 6 (cache_landmarks -> teacher_labels -> train_seg -> export_seg -> build_atlas3 -> make_model_c -> package_model). Never run two GPU jobs at once (10 GB VRAM fills, WDDM paging makes both ~10x slower).
+- Rejected: per-frame darkness gap detection (v1-v9), NCC template tracking (fails across sessions/720p), color-heuristic lip snapping, atlas (averaged) texture fallback (looked grey/flat), image-space pose smoothing.
+
+## Legacy pipeline (teeth_filter.py, `--method edge` / `legacy`)
 1. Capture webcam (DirectShow, MJPG, 1280x720@30). MediaPipe FaceLandmarker (VIDEO mode), landmarks smoothed with adaptive EMA.
 2. `mouth_frame` builds an affine from the inner mouth corners (78, 308) into a canonical 320x260 crop with the mouth 200px wide. `lip_curves` and `mouth_mask` come from the inner-lip landmarks. NOTE: on Scott's webcam the inner-lip landmarks sit several px off the true lip edge, so nothing may rely on lip-line accuracy.
 3. Tooth vs dark: Otsu split of inner-mouth L (EMA), falling back to `dark * max(p90, skin L)`.

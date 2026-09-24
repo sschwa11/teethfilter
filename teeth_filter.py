@@ -981,6 +981,56 @@ def process(frame, pts, st, cfg, atlases):
     return out, (x0, y0, a_b[..., 0])
 
 
+class Capture:
+    def __init__(self, cap, mp, lm, cfg):
+        self.cap, self.mp, self.lm, self.cfg = cap, mp, lm, cfg
+        self.cond = threading.Condition()
+        self.item = None
+        self.seq = 0
+        self.last_ts = 0
+        self.running = True
+        self.paused = False
+        self.idle = threading.Event()
+        threading.Thread(target=self.run, daemon=True).start()
+
+    def run(self):
+        while self.running:
+            if self.paused:
+                self.idle.set()
+                time.sleep(0.01)
+                continue
+            self.idle.clear()
+            ok, frame = self.cap.read()
+            if not ok:
+                time.sleep(0.01)
+                continue
+            ts = max(int(time.monotonic() * 1000), self.last_ts + 1)
+            self.last_ts = ts
+            pts = detect(self.mp, self.lm, frame, ts) if self.cfg.enabled else None
+            with self.cond:
+                self.item = (frame, pts)
+                self.seq += 1
+                self.cond.notify_all()
+        self.idle.set()
+
+    def get(self, last):
+        with self.cond:
+            self.cond.wait_for(lambda: self.seq != last, timeout=0.5)
+            return self.seq, self.item
+
+    def pause(self):
+        self.paused = True
+        self.idle.wait(2.0)
+
+    def resume(self, cap):
+        self.cap = cap
+        self.paused = False
+
+    def stop(self):
+        self.running = False
+        self.idle.wait(2.0)
+
+
 class FrameHub:
     def __init__(self):
         self.cond = threading.Condition()
@@ -1322,22 +1372,22 @@ def main():
     win = "Teeth Filter"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(win, args.window_width, args.window_height)
-    last_ts = 0
     fps = 0.0
     t_prev = time.perf_counter()
     enc = [int(cv2.IMWRITE_JPEG_QUALITY), 92]
     rec = None
     noface = 0
+    grab = Capture(cap, mp, lm, cfg)
+    seq = -1
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            time.sleep(0.01)
+        seq, item = grab.get(seq)
+        if item is None:
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                break
             continue
-        ts = max(int(time.monotonic() * 1000), last_ts + 1)
-        last_ts = ts
+        frame, pts = item
         out, dbg = frame, None
         if cfg.enabled:
-            pts = detect(mp, lm, frame, ts)
             noface = 0 if pts is not None else noface + 1
             if pts is not None:
                 out, dbg = filter_frame(frame, pts, st, cfg, atlases(), anchor)
@@ -1403,6 +1453,7 @@ def main():
             real = cams
             if len(real) > 1:
                 pos = next((n for n, c in enumerate(real) if c[0] == cam_idx), -1)
+                grab.pause()
                 for step in range(1, len(real) + 1):
                     nxt = real[(pos + step) % len(real)]
                     cap.release()
@@ -1414,6 +1465,7 @@ def main():
                         if anchor is not None:
                             anchor.reset()
                         break
+                grab.resume(cap)
                 print(f"Using camera: {cfg.camera_name}")
         elif k == ord("m") and cfg.ai is not None:
             cfg.fill = "mirror" if cfg.fill == "ai" else "ai"
@@ -1444,7 +1496,8 @@ def main():
     if rec is not None:
         rec.close()
     save_settings(cfg, st, anchor)
-    cap.release()
+    grab.stop()
+    grab.cap.release()
     lm.close()
     server.shutdown()
     cv2.destroyAllWindows()

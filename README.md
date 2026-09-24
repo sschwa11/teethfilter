@@ -33,7 +33,11 @@ Press `p` to switch the fill source to `reference`.
 
 ## How it works
 
-Each frame, the filter finds dark holes in your tooth rows that have real teeth on both sides, and only those. It fills them by cloning your own tooth from the mirror-image position on the other side of your mouth, or from the tooth next to the gap, and matches the brightness. The dark space between your upper and lower teeth, lip shadows and the mouth corners are left alone. A gap must be seen for 2 frames before it's filled, and a confirmed gap is held briefly so it doesn't flicker.
+The filter tracks your head and knows where your missing teeth sit relative to your skull, so it never has to hunt for dark gaps. Each frame it locks onto the edge of your real front tooth, mirrors your own teeth from the other side of your mouth into the missing positions (upper and lower), and keeps your lips in front using a small mouth-segmentation model trained on your recordings. Everything comes from the live frame, so lighting and focus always match.
+
+It needs `teeth_model.npz` and `teeth_seg.onnx` (both included). The older gap-detecting methods are still available with `--method edge` or `--method legacy`.
+
+See **HANDOFF.md** for current quality numbers, known problems, how to retrain after recording new clips, and how to keep working on it.
 
 ## AI fill (optional, recommended)
 

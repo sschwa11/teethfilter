@@ -208,7 +208,7 @@ class AnchorFill:
         self.seg = Segmenter(seg_path)
         self.edge_x0 = self.x_mid + float(z["edge_offset"])
         self.upper = True
-        self.lower = False
+        self.lower = True
         self.extend_px = 6.0
         self.bottom_margin = 1.0
         self.smooth = "crop"

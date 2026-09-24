@@ -10,8 +10,10 @@ CW, CH = R.CW, R.CH
 
 def keys():
     out = []
-    for p in sorted(glob.glob(os.path.join(CACHE, "*_reg.pkl"))):
-        out.append(os.path.basename(p)[:-8])
+    for p in sorted(glob.glob(os.path.join(CACHE, "*.npz"))):
+        z = np.load(p)
+        if "ok" in z.files and "pts" in z.files and z["ok"].sum() >= 60:
+            out.append(os.path.splitext(os.path.basename(p))[0])
     return out
 
 
