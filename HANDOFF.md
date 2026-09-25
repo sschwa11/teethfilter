@@ -91,6 +91,8 @@ v29-v34 (lower-teeth flicker): the lower fill was switching on and off. The colu
 
 Measured on your last three recordings (`lab/lower_blink.py`), frames where the lower gap still shows dropped from 25% / 16% / 17% (v28) to 9% / 6% / 14%, with about half as many frame-to-frame jumps. Blind AI judges (6 judges, 22 lower-teeth strips, v33 vs v28) preferred the new lower fill 65 to 25, with 42 ties. They counted a visible lower gap in 1.5 of 8 frames versus 2.7. Remaining: with the tongue raised in a wide-open mouth, a bright block can appear above the lower teeth; flat-looking blocks sometimes appear at the right end of the lower fill.
 
+v35: on your 10-05-06 recording (live v34), frames where the lower gap still shows were 5.4% (v28 on the same clip: 9.2%). A blind defect review found the most common remaining flaw was a thin too-white crescent along the bottom of the lower fill where it meets the lip. The bottom 4 px of the lower fill are now shaded up to 25% (`l_lip_shade`). Still seen: a one-frame dark notch below the filled lateral when the mouth is barely open (it mirrors the real dark space on the other side), and faint/streaky upper fill in nearly closed slits.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).

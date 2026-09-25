@@ -245,6 +245,8 @@ class AnchorFill:
         self.fall_l_none = 0.34
         self.l_near = 12
         self.l_span = 76
+        self.l_fade = 0.0
+        self.l_lip_shade = 0.25
         self.lax_step = 0.5
         self.rise_l = 1.0
         self.stable = True
@@ -809,6 +811,14 @@ class AnchorFill:
             xd_row = xd_row + shift[di]
         xd = np.ascontiguousarray(np.broadcast_to(xd_row[None, :], (CH - ya, xb - xa))).astype(np.float32)
         tex_b = cv2.remap(crop, xd, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        if self.l_fade > 0 or self.l_lip_shade > 0:
+            shade = 1 - self.l_fade * np.clip((xs[xa:xb] - xm) / span, 0, 1)[None, :]
+            on = alpha_b > 0.5
+            bot_r = np.where(on.any(0), on.shape[0] - 1 - np.argmax(on[::-1], 0), -1)
+            ry = np.arange(on.shape[0])[:, None]
+            near_lip = np.clip(1 - (bot_r[None, :] - ry) / 4.0, 0, 1) * (bot_r >= 0)[None, :]
+            shade = shade * (1 - self.l_lip_shade * near_lip)
+            tex_b = tex_b * shade[..., None]
         crop_b = crop[B].astype(np.float32)
         if self.seam_band:
             t2, a2 = self.heal_seam(crop_b[:, ::-1], tex_b[:, ::-1], alpha_b[:, ::-1].astype(np.float32), lt, (xb - xa - 1) - (xm - xa))
