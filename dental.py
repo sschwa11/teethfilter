@@ -233,6 +233,19 @@ class AnchorFill:
         self.lower_axis = True
         self.l_bridge = 15
         self.occl = True
+        self.l_rows = 22
+        self.lax_n = 0
+        self.l_inset = 0.0
+        self.l_src_fix = True
+        self.l_edge_fill = 14
+        self.l_hold = 6
+        self.l_reach_left = 34
+        self.l_min_rows = 10
+        self.l_need_gap = 0.15
+        self.fall_l_none = 0.34
+        self.l_near = 12
+        self.l_span = 76
+        self.lax_step = 0.5
         self.rise_l = 1.0
         self.stable = True
         self.st_rate = 0.12
@@ -269,6 +282,10 @@ class AnchorFill:
         self.reg_ok = False
         self.recent = []
         self.lax = None
+        self.lax_hist = []
+        self.lcm_t = None
+        self.lcm_b = None
+        self.lcm_age = None
         self.relock_t = 0
         self.st_tex = None
         self.st_seen = None
@@ -648,31 +665,57 @@ class AnchorFill:
         return tex, alpha
 
     def find_lower_axis(self, L, inm, thr, reach=20):
-        c0, c1 = int(self.x_mid) - reach - 8, int(self.x_mid) + reach + 6
+        c0, c1 = int(self.x_mid) - self.l_reach_left - 8, int(self.x_mid) + reach + 6
         cols = np.arange(c0, c1)
         rows = np.arange(CH)[:, None]
         has = inm[:, cols].any(0)
         lb = np.where(has, CH - 1 - np.argmax(inm[::-1, cols], 0), -1)
         ub = self.bottom_full[cols] + 1.0
-        band = inm[:, cols] & (rows > ub[None, :]) & (rows <= lb[None, :])
+        band = inm[:, cols] & (rows > ub[None, :]) & (rows <= lb[None, :]) & (rows >= lb[None, :] - self.l_rows)
         n = band.sum(0)
         if band.sum() >= 40:
             vals = L[:, cols][band]
-            thr = min(thr, 0.5 * (float(np.percentile(vals, 90)) + float(np.percentile(vals, 15))))
+            hi, lo = float(np.percentile(vals, 90)), float(np.percentile(vals, 15))
+            if hi - lo > 25:
+                thr = 0.5 * (hi + lo)
         p = np.where(n >= 4, ((L[:, cols] >= thr) & band).sum(0) / np.maximum(n, 1), 0.0)
         cs = np.concatenate([[0.0], np.cumsum(p)])
         j = np.arange(8, len(cols) - 6)
         left = (cs[j + 1] - cs[j - 7]) / 8
         right = (cs[j + 6] - cs[j + 1]) / 5
         q = (left > 0.4) & (right < 0.3) & (left - right > 0.25)
-        found = cols[j[np.argmax(q)]] + 0.5 if q.any() else None
+        found = cols[j[np.argmax(q)]] + 0.5 - self.l_inset if q.any() and np.median(n[has]) >= self.l_min_rows else None
         self.l_thr = thr
-        if found is not None:
+        if self.lax_n > 0:
+            if found is not None:
+                self.lax_hist = (self.lax_hist + [float(found)])[-self.lax_n:]
+            if self.lax_hist:
+                target = float(np.median(self.lax_hist))
+                if self.lax is None:
+                    self.lax = target
+                else:
+                    self.lax += float(np.clip(target - self.lax, -self.lax_step, self.lax_step))
+        elif found is not None:
             if self.lax is None:
                 self.lax = float(found)
             else:
                 self.lax += float(np.clip(0.6 * (found - self.lax), -3.0, 3.0))
         return self.lax if self.lax is not None else self.x_mid
+
+    def lower_col_memory(self, t_s, b_s, valid, xs, xm, span):
+        if self.lcm_t is None:
+            self.lcm_t = np.full(CW, np.nan, np.float32)
+            self.lcm_b = np.full(CW, np.nan, np.float32)
+            self.lcm_age = np.full(CW, 99, np.int32)
+        both = valid & ~np.isnan(self.lcm_t)
+        dy = float(np.median(t_s[both] - self.lcm_t[both])) if both.sum() >= 5 else 0.0
+        keep = ~valid & (self.lcm_age < self.l_hold) & ~np.isnan(self.lcm_t) & (xs > xm) & (xs < xm + span)
+        t_s = np.where(keep, self.lcm_t + dy, t_s)
+        b_s = np.where(keep, self.lcm_b + dy, b_s)
+        self.lcm_t = np.where(valid, t_s, self.lcm_t + dy).astype(np.float32)
+        self.lcm_b = np.where(valid, b_s, self.lcm_b + dy).astype(np.float32)
+        self.lcm_age = np.where(valid, 0, self.lcm_age + 1).astype(np.int32)
+        return t_s, b_s, valid | keep
 
     def lower_fill(self, crop, L, mouth, span=64):
         xm = self.x_mid
@@ -693,12 +736,22 @@ class AnchorFill:
             xm = self.find_lower_axis(L, inm, thr)
             thr = self.l_thr
             cols = np.arange(int(xm - span), int(xm))
+        if self.l_need_gap > 0:
+            tc = np.arange(int(xm) + 2, min(int(xm) + 30, CW))
+            tin = inm[:, tc]
+            tlb = np.where(tin.any(0), CH - 1 - np.argmax(tin[::-1], 0), -1)
+            ry = np.arange(CH)[:, None]
+            tband = tin & (ry > self.bottom_full[tc][None, :] + 1) & (ry <= tlb[None, :])
+            if tband.sum() >= 30 and inm[:, cols].any():
+                hi = float(np.percentile(L[:, cols][inm[:, cols]], 90))
+                if (L[:, tc][tband] < 0.7 * hi).mean() < self.l_need_gap:
+                    return None
         has = inm[:, cols].any(0)
         lb = np.where(has, CH - 1 - np.argmax(inm[::-1, cols], 0), -1)
         ub = self.bottom_full[cols] + 1.0
         rows = np.arange(CH)[:, None]
         cand = (L[:, cols] >= thr) & inm[:, cols] & (rows <= lb[None, :]) & (rows > ub[None, :])
-        near = rows >= lb[None, :] - 6
+        near = rows >= lb[None, :] - self.l_near
         start_ok = (cand & near).any(0)
         bot = np.where(start_ok, CH - 1 - np.argmax((cand & near)[::-1], 0), -1)
         gap = ~cand & (rows <= bot[None, :]) & (rows > ub[None, :])
@@ -724,6 +777,16 @@ class AnchorFill:
         t_s = np.where(in_span, top_l[xdi], np.nan)
         b_s = np.where(in_span, bot_l[xdi], np.nan)
         valid = ~np.isnan(t_s)
+        if self.l_edge_fill > 0:
+            tgt = np.flatnonzero(valid)
+            x0i = int(np.floor(xm)) + 1
+            if tgt.size and x0i < tgt[0] <= x0i + self.l_edge_fill:
+                fv = tgt[0]
+                t_s[x0i:fv] = t_s[fv]
+                b_s[x0i:fv] = b_s[fv]
+                valid[x0i:fv] = True
+        if self.l_hold > 0:
+            t_s, b_s, valid = self.lower_col_memory(t_s, b_s, valid, xs, xm, span)
         low = np.maximum(np.where(valid, t_s, CH) - 0.5, self.bottom_full + 1.0)
         taper = np.clip((xm + span - xs) / 10.0, 0, 1) * np.clip((xs - xm) / 1.5, 0, 1)
         xa, xb = max(int(xm) - 10, 0), min(int(np.ceil(xm + span)) + 4, CW)
@@ -733,7 +796,18 @@ class AnchorFill:
         B = (slice(ya, CH), slice(xa, xb))
         alpha_b = np.clip((GY[B] - low[None, xa:xb]) / 1.5, 0, 1) * np.clip((mouth[B] - 0.15) / 0.3, 0, 1) * (valid * taper)[None, xa:xb]
         mapy = np.minimum(GY[B], np.nan_to_num(b_s[xa:xb], nan=CH)[None, :]).astype(np.float32)
-        xd = np.ascontiguousarray(2 * xm - GX[B]).astype(np.float32)
+        xd_row = 2 * xm - xs[xa:xb].astype(np.float32)
+        if self.l_src_fix and (~ok).any():
+            okidx = np.flatnonzero(ok)
+            k = np.arange(len(cols))
+            pos = np.clip(np.searchsorted(okidx, k), 1, len(okidx) - 1) if len(okidx) > 1 else np.zeros(len(k), int)
+            lo_i, hi_i = okidx[np.maximum(pos - 1, 0)], okidx[np.minimum(pos, len(okidx) - 1)]
+            near = np.where(np.abs(k - lo_i) <= np.abs(hi_i - k), lo_i, hi_i)
+            shift = np.zeros(CW, np.float32)
+            shift[cols] = (cols[near] - cols).astype(np.float32)
+            di = np.clip(np.round(xd_row).astype(int), 0, CW - 1)
+            xd_row = xd_row + shift[di]
+        xd = np.ascontiguousarray(np.broadcast_to(xd_row[None, :], (CH - ya, xb - xa))).astype(np.float32)
         tex_b = cv2.remap(crop, xd, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
         crop_b = crop[B].astype(np.float32)
         if self.seam_band:
@@ -790,7 +864,7 @@ class AnchorFill:
         else:
             self.au_prev = None
         if self.lower and gate > 0:
-            lf = self.lower_fill(crop, L, mouth)
+            lf = self.lower_fill(crop, L, mouth, span=self.l_span)
             raw_l = np.zeros((CH, CW), np.float32)
             if lf is not None:
                 tex_l, raw_l = lf
@@ -807,7 +881,7 @@ class AnchorFill:
             lim_l = mclip
             if self.lower_axis and self.lax is not None:
                 lim_l = mclip * (GX >= self.lax - 4)
-            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, lim_l, rise=self.rise_l)
+            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, lim_l, rise=self.rise_l, fall=0.34 if lf is not None else self.fall_l_none)
             if self.lmem is not None:
                 tex_l = np.where((alpha_l > raw_l + 0.05)[..., None], self.lmem, tex_l)
             use_l = alpha_l > alpha

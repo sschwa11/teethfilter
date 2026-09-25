@@ -81,6 +81,16 @@ v27: with the mouth wide open, the lower axis sometimes locked onto the stub tee
 
 v28: occlusion guard. The fill only replaces pixels darker than itself, so a hand or finger in front of the mouth is no longer painted over. It also trims the too-white lower slivers slightly. The lower fill now works only in its own region, which cuts about 12% of CPU per frame. Still known: "O"/pucker shapes. Your face landmarks shift when you pucker, so the fill lands about 5 px off. The tracker's correct measurements in those frames are weak, and accepting weak measurements made tracking worse overall (tested with `lab/track_score.py`).
 
+v29-v34 (lower-teeth flicker): the lower fill was switching on and off. The columns next to your healthy lower teeth were dropped in some frames and kept in others, so a dark strip flashed at the lower midline. Fixes:
+- The fill remembers each column for 6 frames.
+- Short gaps back to the mirror line are extended.
+- Bridged columns take texture from the nearest solid tooth instead of the dark gap.
+- The mirror line search reaches further left (your jaw shifts further when the mouth is wide open) and uses a threshold from the lower teeth themselves.
+- The lower teeth may end up to 12 px above the lip line (the lip curves down near the middle).
+- The fill is 76 px wide.
+
+Measured on your last three recordings (`lab/lower_blink.py`), frames where the lower gap still shows dropped from 25% / 16% / 17% (v28) to 9% / 6% / 14%, with about half as many frame-to-frame jumps. Blind AI judges (6 judges, 22 lower-teeth strips, v33 vs v28) preferred the new lower fill 65 to 25, with 42 ties. They counted a visible lower gap in 1.5 of 8 frames versus 2.7. Remaining: with the tongue raised in a wide-open mouth, a bright block can appear above the lower teeth; flat-looking blocks sometimes appear at the right end of the lower fill.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).
