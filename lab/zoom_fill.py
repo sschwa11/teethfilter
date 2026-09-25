@@ -11,7 +11,7 @@ if os.environ.get("LIVE"):
 for k, v in (a.split("=") for a in sys.argv[4:]):
     setattr(af, k, eval(v))
 rows = []; n = 0
-y0, y1, x0, x1 = (95, 165, 100, 230) if not os.environ.get("LOW") else (120, 180, 110, 220)
+y0, y1, x0, x1 = (95, 165, 100, 230) if not os.environ.get("LOW") else tuple(int(v) for v in os.environ["LOW"].split(",")) if "," in os.environ.get("LOW", "") else (120, 180, 110, 220)
 while n <= max(frames):
     ok, f = cap.read()
     if not ok: break

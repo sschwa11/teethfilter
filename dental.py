@@ -659,12 +659,11 @@ class AnchorFill:
             thr = min(thr, 0.5 * (float(np.percentile(vals, 90)) + float(np.percentile(vals, 15))))
         p = np.where(n >= 4, ((L[:, cols] >= thr) & band).sum(0) / np.maximum(n, 1), 0.0)
         cs = np.concatenate([[0.0], np.cumsum(p)])
-        prior = self.lax if self.lax is not None else self.x_mid
         j = np.arange(8, len(cols) - 6)
         left = (cs[j + 1] - cs[j - 7]) / 8
         right = (cs[j + 6] - cs[j + 1]) / 5
-        score = np.where((left > 0.4) & (left - right > 0.25), left - right - 0.01 * np.abs(cols[j] + 0.5 - prior), -np.inf)
-        found = cols[j[np.argmax(score)]] + 0.5 if np.isfinite(score.max()) else None
+        q = (left > 0.4) & (right < 0.3) & (left - right > 0.25)
+        found = cols[j[np.argmax(q)]] + 0.5 if q.any() else None
         self.l_thr = thr
         if found is not None:
             if self.lax is None:
