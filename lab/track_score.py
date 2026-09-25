@@ -2,7 +2,7 @@ import sys, cv2, numpy as np
 sys.path.insert(0, "..")
 import dental as D
 
-CLIPS = ["2026-09-25_00-43-21_raw", "2026-09-24_06-33-17_raw", "2026-09-24_06-32-55_raw"]
+CLIPS = ["2026-09-25_02-36-08_raw", "2026-09-25_01-18-25_raw", "2026-09-25_01-10-45_raw", "2026-09-25_00-43-21_raw", "2026-09-24_06-33-17_raw"]
 
 
 def run(key, opts):

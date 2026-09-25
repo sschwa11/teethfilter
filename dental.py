@@ -187,8 +187,9 @@ def shift_img(img, d, border=cv2.BORDER_REPLICATE):
 
 
 def smooth_cols(v, k=5):
-    pad = np.pad(v, k // 2, mode="edge")
-    return np.median(np.lib.stride_tricks.sliding_window_view(pad, k), 1)
+    if v.size < k:
+        return np.asarray(v, np.float32).copy()
+    return cv2.medianBlur(np.ascontiguousarray(v, np.float32).reshape(1, -1), k).ravel()
 
 
 class AnchorFill:
@@ -231,6 +232,7 @@ class AnchorFill:
         self.l_need = 1
         self.lower_axis = True
         self.l_bridge = 15
+        self.occl = True
         self.rise_l = 1.0
         self.stable = True
         self.st_rate = 0.12
@@ -724,15 +726,34 @@ class AnchorFill:
         valid = ~np.isnan(t_s)
         low = np.maximum(np.where(valid, t_s, CH) - 0.5, self.bottom_full + 1.0)
         taper = np.clip((xm + span - xs) / 10.0, 0, 1) * np.clip((xs - xm) / 1.5, 0, 1)
-        alpha = np.clip((GY - low[None, :]) / 1.5, 0, 1) * np.clip((mouth - 0.15) / 0.3, 0, 1) * (valid * taper)[None, :]
-        mapy = np.minimum(GY, np.nan_to_num(b_s, nan=CH)[None, :]).astype(np.float32)
-        xd = self.xd_map if xm == self.x_mid else np.ascontiguousarray(np.broadcast_to((2 * xm - GX[0])[None, :], (CH, CW))).astype(np.float32)
-        tex = cv2.remap(crop, xd, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        xa, xb = max(int(xm) - 10, 0), min(int(np.ceil(xm + span)) + 4, CW)
+        ya = max(int(np.floor(low[xa:xb].min())) - 4, 0)
+        if ya >= CH - 1:
+            return None
+        B = (slice(ya, CH), slice(xa, xb))
+        alpha_b = np.clip((GY[B] - low[None, xa:xb]) / 1.5, 0, 1) * np.clip((mouth[B] - 0.15) / 0.3, 0, 1) * (valid * taper)[None, xa:xb]
+        mapy = np.minimum(GY[B], np.nan_to_num(b_s[xa:xb], nan=CH)[None, :]).astype(np.float32)
+        xd = np.ascontiguousarray(2 * xm - GX[B]).astype(np.float32)
+        tex_b = cv2.remap(crop, xd, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        crop_b = crop[B].astype(np.float32)
         if self.seam_band:
-            t2, a2 = self.heal_seam(crop[:, ::-1], tex[:, ::-1], alpha[:, ::-1].astype(np.float32), lt, CW - 1 - xm)
-            tex, alpha = t2[:, ::-1], a2[:, ::-1]
-            tex = np.where((alpha > 0)[..., None], tex, crop.astype(np.float32))
-        return tex, cv2.GaussianBlur(alpha.astype(np.float32), (0, 0), 0.8)
+            t2, a2 = self.heal_seam(crop_b[:, ::-1], tex_b[:, ::-1], alpha_b[:, ::-1].astype(np.float32), lt, (xb - xa - 1) - (xm - xa))
+            tex_b, alpha_b = t2[:, ::-1], a2[:, ::-1]
+            tex_b = np.where((alpha_b > 0)[..., None], tex_b, crop_b)
+        tex = crop.astype(np.float32)
+        tex[B] = tex_b
+        alpha = np.zeros((CH, CW), np.float32)
+        alpha[B] = cv2.GaussianBlur(alpha_b.astype(np.float32), (0, 0), 0.8, borderType=cv2.BORDER_CONSTANT)
+        return tex, alpha
+
+    def occlusion_guard(self, tex, L, alpha):
+        ys, xs = np.nonzero(alpha > 0.01)
+        y0, y1, x0, x1 = max(ys.min() - 3, 0), min(ys.max() + 4, CH), max(xs.min() - 3, 0), min(xs.max() + 4, CW)
+        lt = cv2.cvtColor(np.clip(tex[y0:y1, x0:x1], 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+        g = 1 - np.clip((L[y0:y1, x0:x1] - lt - 4) / 12.0, 0, 1)
+        alpha = alpha.copy()
+        alpha[y0:y1, x0:x1] *= cv2.GaussianBlur(g, (0, 0), 1.2)
+        return alpha
 
     def process(self, frame, pts):
         pose = self.df.pose(pts)
@@ -794,6 +815,8 @@ class AnchorFill:
             alpha = np.maximum(alpha, alpha_l)
         else:
             self.al_prev = None
+        if self.occl and alpha.max() > 0.01:
+            alpha = self.occlusion_guard(tex, L, alpha)
         self.last = (a, alpha)
         if self.debug:
             self.dbg = {"crop": crop, "mouth": mouth, "alpha": alpha, "tex": tex, "delta": self.delta.copy(), "miss": self.miss, "locks": self.locks, "gate": gate, "alpha_u": alpha_u, "alpha_l": alpha_l}

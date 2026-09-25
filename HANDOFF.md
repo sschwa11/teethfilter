@@ -79,6 +79,8 @@ v26 (lower axis): your lower jaw shifts sideways relative to your skull as you t
 
 v27: with the mouth wide open, the lower axis sometimes locked onto the stub teeth on the far side of the gap. It now takes the first real dark run coming from the healthy side, which fills the lower gap in wide-open and laughing frames. Known: a one-frame tooth patch can appear on a finger when a hand sweeps over the mouth; "O"/pucker shapes still show the upper gap; with the mouth wide open the fill takes ~26 ms per frame.
 
+v28: occlusion guard. The fill only replaces pixels darker than itself, so a hand or finger in front of the mouth is no longer painted over. It also trims the too-white lower slivers slightly. The lower fill now works only in its own region, which cuts about 12% of CPU per frame. Still known: "O"/pucker shapes. Your face landmarks shift when you pucker, so the fill lands about 5 px off. The tracker's correct measurements in those frames are weak, and accepting weak measurements made tracking worse overall (tested with `lab/track_score.py`).
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).
