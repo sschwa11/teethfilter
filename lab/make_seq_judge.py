@@ -6,7 +6,7 @@ base_path = (lambda b: f"../recordings/{b}_filtered.mp4") if base == "live" else
 rng = np.random.default_rng(3)
 jdir = f"out/judge_{name}"; os.makedirs(jdir, exist_ok=True)
 key = []; k = 0
-for clip, n_seg in (("2026-09-24_06-33-17_raw", 8), ("2026-09-24_06-32-55_raw", 5)):
+for clip, n_seg in (("2026-09-24_06-33-17_raw", 8), ("2026-09-24_06-32-55_raw", 5), ("2026-09-25_00-43-21_raw", 7)):
     d = dict(np.load(f"cache/{clip}.npz", allow_pickle=True))
     stem = clip[:-4]
     opn = np.array([np.linalg.norm(p[13, :2] - p[14, :2]) / max(np.linalg.norm(p[78, :2] - p[308, :2]), 1) for p in d["pts"]])

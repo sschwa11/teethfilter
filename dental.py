@@ -217,8 +217,17 @@ class AnchorFill:
         self.extend_px = 6.0
         self.bottom_margin = 1.0
         self.smooth = "crop"
-        self.k_new = 0.7
+        self.k_new = 0.5
         self.k_reg = 0.35
+        self.use_reg = False
+        self.robust = True
+        self.robust_n = 12
+        self.med_pull = 0.15
+        self.max_step = 1.5
+        self.y_clip = 3.0
+        self.y_gain = 0.4
+        self.live_ext = 6.0
+        self.relock_conf = 0.12
         self.stable = True
         self.st_rate = 0.12
         self.shade = False
@@ -252,6 +261,8 @@ class AnchorFill:
         self.prev_hp = None
         self.prev_mouth = None
         self.reg_ok = False
+        self.recent = []
+        self.relock_t = 0
         self.st_tex = None
         self.st_seen = None
         self.st_sil = None
@@ -327,7 +338,7 @@ class AnchorFill:
 
     def anchor(self, a0, L0, mouth0):
         hp = L0 - cv2.GaussianBlur(L0, (0, 0), 3.0)
-        shift = self.register(hp, mouth0)
+        shift = self.register(hp, mouth0) if self.use_reg else None
         self.prev_hp, self.prev_mouth, self.prev_L = hp, mouth0, L0
         meas = self.et.measure(L0, mouth0)
         base = np.array([self.et.x0, self.et.b0])
@@ -335,21 +346,29 @@ class AnchorFill:
         if self.delta is not None:
             pred = self.delta + shift if shift is not None else self.delta.copy()
         ref = pred if (pred is not None and (self.miss < 30 or shift is not None)) else self.et.off
+        med = float(np.median(self.recent)) if (self.robust and len(self.recent) >= 5) else None
         good = False
         if meas is not None and meas["conf"] >= 0.06:
             yo = self.et.off[1]
-            dy = float(np.clip((meas["y"] - base[1]) - yo, -3, 3)) if meas["y"] is not None else 0.0
-            d_m = np.array([meas["x"] - base[0], yo + 0.4 * dy])
+            dy = float(np.clip((meas["y"] - base[1]) - yo, -self.y_clip, self.y_clip)) if meas["y"] is not None else 0.0
+            d_m = np.array([meas["x"] - base[0], yo + self.y_gain * dy])
+            if self.robust and meas["conf"] >= 0.12:
+                self.recent = (self.recent + [d_m[0]])[-self.robust_n:]
             err = abs(d_m[0] - ref[0])
+            if med is not None:
+                err = min(err, abs(d_m[0] - med) + 1.0)
             if self.et.n < 15:
                 good = meas["conf"] >= 0.12
             elif meas["conf"] >= 0.12 and err <= min(4.0 + 0.25 * self.miss, 12.0):
                 good = True
             elif err <= 2.5:
                 good = True
-            elif meas["conf"] >= 0.12:
+            elif meas["conf"] >= self.relock_conf:
                 self.outliers.append(d_m[0])
                 good = len(self.outliers) >= 3 and np.ptp(self.outliers[-3:]) < 4
+                if good and self.robust:
+                    self.recent = list(self.outliers[-3:])
+                    self.relock_t = 6
             if good:
                 self.outliers = []
         self.reg_ok = shift is not None
@@ -368,8 +387,16 @@ class AnchorFill:
                 self.delta = self.et.off.copy()
             else:
                 self.delta = pred
-                if shift is None and self.miss > 8:
+                if med is not None:
+                    self.delta = self.delta.copy()
+                    self.delta[0] += self.med_pull * (med - self.delta[0])
+                elif shift is None and self.miss > 8:
                     self.delta = self.delta + 0.05 * (self.et.off - self.delta)
+        if pred is not None and self.max_step > 0:
+            prev = pred - (shift if shift is not None else 0)
+            step = self.max_step * (2.0 if self.relock_t > 0 else 1.0)
+            self.delta[0] = prev[0] + float(np.clip(self.delta[0] - prev[0], -step, step))
+        self.relock_t = max(self.relock_t - 1, 0)
 
     def hold(self, raw, prev, limit, rise=0.6, fall=0.34):
         if prev is None:
@@ -411,12 +438,15 @@ class AnchorFill:
             b = cv2.dilate(bot[sel].astype(np.float32).reshape(1, -1), np.ones((1, 9), np.uint8)).ravel()
             bot[sel] = np.minimum(smooth_cols(b, 5), cap[sel])
         live_ok = has & (bot > top_d + 2)
+        raw_bot = np.where(at_start, first_dark, last_up).astype(np.float32)
         if self.stable:
             vis_s = (mouth_d > 0.75) & inb
             self.stable_update(live, vis_s, vis_s & (L_d > 0.62 * lt) if lt > 0 else np.zeros_like(vis_s))
             st = self.stable_render(rows, gy, body, cap)
             if st is not None:
                 tex, cover, has_st = st
+                if self.live_ext > 0:
+                    tex, cover = self.extend_live(tex, cover, live, raw_bot, cap + self.live_ext, has & has_st, rows, gy)
                 mt = self.extend_dark(mouth[R], L[R], lt, inb)
                 self.mouth_t = mouth.copy()
                 self.mouth_t[R] = mt
@@ -494,6 +524,20 @@ class AnchorFill:
         conf = np.clip(den / 0.2, 0, 1)
         new = 1 + (num / np.maximum(den, 1e-6) - 1) * conf
         self.st_shade = (0.5 * self.st_shade + 0.5 * np.clip(new, 0.35, 1.3)).astype(np.float32)
+
+    def extend_live(self, tex, cover, live, raw_bot, cap2, ok, rows, gy):
+        sb = np.where((cover > 0.5).any(0), rows[-1, 0] - np.argmax((cover > 0.5)[::-1], 0), 0).astype(np.float32)
+        lb = np.minimum(raw_bot, cap2)
+        sel = np.flatnonzero(ok)
+        if sel.size >= 5:
+            lb[sel] = smooth_cols(lb[sel], 5)
+        grow = ok & (lb > sb + 1)
+        if not grow.any():
+            return tex, cover
+        band = grow[None, :] & (rows > sb[None, :]) & (rows <= lb[None, :])
+        tex = np.where(band[..., None], live, tex).astype(np.float32)
+        cover = np.maximum(cover, band * np.clip(lb[None, :] + 0.5 - gy, 0, 1)).astype(np.float32)
+        return tex, cover
 
     def stable_render(self, rows, gy, body, cap):
         h = rows.shape[0]

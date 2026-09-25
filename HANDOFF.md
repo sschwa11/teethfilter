@@ -46,6 +46,8 @@ Everything is in `dental.py`. Its tunables are attributes on `AnchorFill`:
 - `gain_lo`/`gain_hi`/`gain_k`: brightness-matching limits and speed (0.4 / 1.8 / 0.7).
 - `rise_u`: how fast the upper fill appears (1.0 = instantly).
 - `seam_band`: seam healing on/off.
+- `robust`, `max_step`, `use_reg`: tracking (median gating on, 1.5 px/frame cap, registration off).
+- `live_ext`: how far below the model's tooth edge the fill may follow your real tooth (6 px).
 - `stable = False` goes back to the per-frame live mirror (v13 behaviour).
 - `upper` / `lower`: which arches are filled.
 - The slot width is the `66.0` in `__init__`: 66 = central + lateral, 88 would include the canine.
@@ -68,6 +70,8 @@ Flicker (v20-v23) was judged by 4 blind AI judges on 13 pairs of 8-consecutive-f
 | v20 stable tooth + registration | 17 / 12 / 23 | 2.62 vs 2.85 |
 | v22 + correct brightness gain, instant appear | 12 / 4 / 36 | 3.17 vs 3.35 |
 | v23 (current) + seam healing | 11 / 10 / 31 | 3.15 vs 3.06 |
+
+v24 (tracking): on your 2026-09-25 recording, the fill sometimes sat 4-8 px beside your real tooth and left a dark strip. Frame-to-frame registration was causing drift, and good edge measurements were being rejected. Registration is now off, measurements are gated against the median of recent ones, and the axis moves at most 1.5 px per frame. The fill also extends down to your real tooth's current biting edge. Tracking error dropped from 1.94 to 1.31 px, and frames more than 3 px off dropped from 22% to 9% (`lab/track_score.py`). On the 8 frames where v23 and v24 differ most, v24 looked better in 5 and worse in 1 (by eye, not blind-judged).
 
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
