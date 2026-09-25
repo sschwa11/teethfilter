@@ -228,6 +228,8 @@ class AnchorFill:
         self.y_gain = 0.4
         self.live_ext = 6.0
         self.relock_conf = 0.12
+        self.l_need = 1
+        self.rise_l = 1.0
         self.stable = True
         self.st_rate = 0.12
         self.shade = False
@@ -744,9 +746,9 @@ class AnchorFill:
             else:
                 self.l_hits = 0
                 tex_l = self.lmem if self.lmem is not None else tex
-            if self.l_hits < 2:
+            if self.l_hits < self.l_need:
                 raw_l = raw_l * 0.0
-            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, mclip)
+            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, mclip, rise=self.rise_l)
             if self.lmem is not None:
                 tex_l = np.where((alpha_l > raw_l + 0.05)[..., None], self.lmem, tex_l)
             use_l = alpha_l > alpha

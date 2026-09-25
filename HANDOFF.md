@@ -73,6 +73,8 @@ Flicker (v20-v23) was judged by 4 blind AI judges on 13 pairs of 8-consecutive-f
 
 v24 (tracking): on your 2026-09-25 recording, the fill sometimes sat 4-8 px beside your real tooth and left a dark strip. Frame-to-frame registration was causing drift, and good edge measurements were being rejected. Registration is now off, measurements are gated against the median of recent ones, and the axis moves at most 1.5 px per frame. The fill also extends down to your real tooth's current biting edge. Tracking error dropped from 1.94 to 1.31 px, and frames more than 3 px off dropped from 22% to 9% (`lab/track_score.py`). On the 8 frames where v23 and v24 differ most, v24 looked better in 5 and worse in 1 (by eye, not blind-judged).
 
+v25 (lower fill): on your 01-10-45 recording, most of the gap you still saw while talking was the lower teeth (viewer's right), not the upper. The lower fill waited 2 frames and then ramped in at 60%, so short mouth openings showed the gap. It now appears immediately (`l_need=1`, `rise_l=1.0`). In a thin sliver it can look slightly too white.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).
