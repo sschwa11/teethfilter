@@ -75,6 +75,8 @@ v24 (tracking): on your 2026-09-25 recording, the fill sometimes sat 4-8 px besi
 
 v25 (lower fill): on your 01-10-45 recording, most of the gap you still saw while talking was the lower teeth (viewer's right), not the upper. The lower fill waited 2 frames and then ramped in at 60%, so short mouth openings showed the gap. It now appears immediately (`l_need=1`, `rise_l=1.0`). In a thin sliver it can look slightly too white.
 
+v26 (lower axis): your lower jaw shifts sideways relative to your skull as you talk, so your healthy lower teeth end anywhere from about 4 px left to 11 px right of the upper midline. The lower fill used the upper midline as its mirror, so it either overlapped your real teeth or left a dark gap next to them. It now finds the edge of your healthy lower teeth every frame and mirrors about that edge. The brightness threshold comes from the lower teeth themselves (they're dimmer than the upper), and gaps between mirrored teeth are bridged up to 15 px wide. Remaining: a dark notch at the lower center line in some frames.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).

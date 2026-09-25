@@ -229,6 +229,8 @@ class AnchorFill:
         self.live_ext = 6.0
         self.relock_conf = 0.12
         self.l_need = 1
+        self.lower_axis = True
+        self.l_bridge = 15
         self.rise_l = 1.0
         self.stable = True
         self.st_rate = 0.12
@@ -264,6 +266,7 @@ class AnchorFill:
         self.prev_mouth = None
         self.reg_ok = False
         self.recent = []
+        self.lax = None
         self.relock_t = 0
         self.st_tex = None
         self.st_seen = None
@@ -642,6 +645,34 @@ class AnchorFill:
         alpha[ok, x0:x1] = np.maximum(alpha[ok, x0:x1], alpha[ok, x0 + 1:x0 + 2])
         return tex, alpha
 
+    def find_lower_axis(self, L, inm, thr, reach=20):
+        c0, c1 = int(self.x_mid) - reach - 8, int(self.x_mid) + reach + 6
+        cols = np.arange(c0, c1)
+        rows = np.arange(CH)[:, None]
+        has = inm[:, cols].any(0)
+        lb = np.where(has, CH - 1 - np.argmax(inm[::-1, cols], 0), -1)
+        ub = self.bottom_full[cols] + 1.0
+        band = inm[:, cols] & (rows > ub[None, :]) & (rows <= lb[None, :])
+        n = band.sum(0)
+        if band.sum() >= 40:
+            vals = L[:, cols][band]
+            thr = min(thr, 0.5 * (float(np.percentile(vals, 90)) + float(np.percentile(vals, 15))))
+        p = np.where(n >= 4, ((L[:, cols] >= thr) & band).sum(0) / np.maximum(n, 1), 0.0)
+        cs = np.concatenate([[0.0], np.cumsum(p)])
+        prior = self.lax if self.lax is not None else self.x_mid
+        j = np.arange(8, len(cols) - 6)
+        left = (cs[j + 1] - cs[j - 7]) / 8
+        right = (cs[j + 6] - cs[j + 1]) / 5
+        score = np.where((left > 0.4) & (left - right > 0.25), left - right - 0.01 * np.abs(cols[j] + 0.5 - prior), -np.inf)
+        found = cols[j[np.argmax(score)]] + 0.5 if np.isfinite(score.max()) else None
+        self.l_thr = thr
+        if found is not None:
+            if self.lax is None:
+                self.lax = float(found)
+            else:
+                self.lax += float(np.clip(0.6 * (found - self.lax), -3.0, 3.0))
+        return self.lax if self.lax is not None else self.x_mid
+
     def lower_fill(self, crop, L, mouth, span=64):
         xm = self.x_mid
         inm = mouth > 0.5
@@ -657,6 +688,10 @@ class AnchorFill:
             lt = float(np.percentile(vals, 92))
         else:
             return None
+        if self.lower_axis:
+            xm = self.find_lower_axis(L, inm, thr)
+            thr = self.l_thr
+            cols = np.arange(int(xm - span), int(xm))
         has = inm[:, cols].any(0)
         lb = np.where(has, CH - 1 - np.argmax(inm[::-1, cols], 0), -1)
         ub = self.bottom_full[cols] + 1.0
@@ -673,11 +708,11 @@ class AnchorFill:
             return None
         t = np.where(ok, top, 0).astype(np.float32)
         t = np.where(t > 0, t, 1e4).astype(np.float32)
-        t = -cv2.dilate(-t.reshape(1, -1), np.ones((1, 7), np.uint8)).ravel()
+        t = -cv2.dilate(-t.reshape(1, -1), np.ones((1, self.l_bridge), np.uint8)).ravel()
         okb = t < 1e4
         t[okb] = smooth_cols(t[okb], 5)
         b = np.where(ok, bot, 0).astype(np.float32)
-        b = cv2.dilate(b.reshape(1, -1), np.ones((1, 7), np.uint8)).ravel()
+        b = cv2.dilate(b.reshape(1, -1), np.ones((1, self.l_bridge), np.uint8)).ravel()
         top_l = np.full(CW, np.nan, np.float32)
         bot_l = np.full(CW, np.nan, np.float32)
         top_l[cols[okb]] = t[okb]
@@ -692,7 +727,8 @@ class AnchorFill:
         taper = np.clip((xm + span - xs) / 10.0, 0, 1) * np.clip((xs - xm) / 1.5, 0, 1)
         alpha = np.clip((GY - low[None, :]) / 1.5, 0, 1) * np.clip((mouth - 0.15) / 0.3, 0, 1) * (valid * taper)[None, :]
         mapy = np.minimum(GY, np.nan_to_num(b_s, nan=CH)[None, :]).astype(np.float32)
-        tex = cv2.remap(crop, self.xd_map, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+        xd = self.xd_map if xm == self.x_mid else np.ascontiguousarray(np.broadcast_to((2 * xm - GX[0])[None, :], (CH, CW))).astype(np.float32)
+        tex = cv2.remap(crop, xd, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
         if self.seam_band:
             t2, a2 = self.heal_seam(crop[:, ::-1], tex[:, ::-1], alpha[:, ::-1].astype(np.float32), lt, CW - 1 - xm)
             tex, alpha = t2[:, ::-1], a2[:, ::-1]
@@ -748,7 +784,10 @@ class AnchorFill:
                 tex_l = self.lmem if self.lmem is not None else tex
             if self.l_hits < self.l_need:
                 raw_l = raw_l * 0.0
-            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, mclip, rise=self.rise_l)
+            lim_l = mclip
+            if self.lower_axis and self.lax is not None:
+                lim_l = mclip * (GX >= self.lax - 4)
+            alpha_l, self.al_prev = self.hold(raw_l * gate, self.al_prev, lim_l, rise=self.rise_l)
             if self.lmem is not None:
                 tex_l = np.where((alpha_l > raw_l + 0.05)[..., None], self.lmem, tex_l)
             use_l = alpha_l > alpha

@@ -5,10 +5,13 @@ key = sys.argv[1]; frames = [int(x) for x in sys.argv[2].split(",")]; out = sys.
 d = dict(np.load(f"cache/{key}.npz", allow_pickle=True))
 cap = cv2.VideoCapture(str(d["path"]))
 af = D.AnchorFill(); af.debug = True
+import json, os
+if os.environ.get("LIVE"):
+    af.reset(json.load(open("../settings.json"))["anchor_offset"]); af.load_state()
 for k, v in (a.split("=") for a in sys.argv[4:]):
     setattr(af, k, eval(v))
 rows = []; n = 0
-y0, y1, x0, x1 = 95, 165, 100, 230
+y0, y1, x0, x1 = (95, 165, 100, 230) if not os.environ.get("LOW") else (120, 180, 110, 220)
 while n <= max(frames):
     ok, f = cap.read()
     if not ok: break
