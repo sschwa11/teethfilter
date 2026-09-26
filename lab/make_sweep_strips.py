@@ -13,34 +13,40 @@ d = dict(np.load(f"cache/{key}.npz", allow_pickle=True))
 opn = np.array([np.linalg.norm(p[13, :2] - p[14, :2]) / max(np.linalg.norm(p[78, :2] - p[308, :2]), 1) if ok else 0 for p, ok in zip(d["pts"], d["ok"])])
 jdir = f"out/sweep_{name}"
 os.makedirs(jdir, exist_ok=True)
-cr = cv2.VideoCapture(f"../recordings/{key[:-4]}_raw.mp4")
-co = cv2.VideoCapture(out_video)
-raw, out = [], []
-while True:
-    a, fa = cr.read()
-    b, fb = co.read()
-    if not a or not b:
-        break
-    raw.append(fa)
-    out.append(fb)
+n_frames = len(d["ok"])
 starts = []
 s = 0
-while s < len(raw) - 8:
+while s < n_frames - 8:
     if (opn[s:s + 8] > 0.06).sum() >= 4 and d["ok"][s:s + 8].all():
         starts.append(s)
         s += step
     else:
         s += 2
+need = {f: s for s in starts for f in range(s, s + 8)}
+boxes = {s: mouth_box(d["pts"][s + 4], (720, 1280), 0.8) for s in starts}
+crops = {}
+cr = cv2.VideoCapture(f"../recordings/{key[:-4]}_raw.mp4")
+co = cv2.VideoCapture(out_video)
+n = 0
+while n <= max(need):
+    a, fa = cr.read()
+    b, fb = co.read()
+    if not a or not b:
+        break
+    if n in need:
+        x0, y0, w, h = boxes[need[n]]
+        crops[n] = (fa[y0:y0 + h, x0:x0 + w].copy(), fb[y0:y0 + h, x0:x0 + w].copy())
+    n += 1
 index = []
 for k, s in enumerate(starts):
-    x0, y0, w, h = mouth_box(d["pts"][s + 4], raw[s].shape, 0.8)
+    x0, y0, w, h = boxes[s]
     tw = 200
     th = int(tw * h / w)
     rows = []
-    for src in (raw, out):
+    for which in (0, 1):
         tiles = []
         for i in range(8):
-            t = cv2.resize(src[s + i][y0:y0 + h, x0:x0 + w], (tw, th), interpolation=cv2.INTER_CUBIC)
+            t = cv2.resize(crops[s + i][which], (tw, th), interpolation=cv2.INTER_CUBIC)
             tiles.append(t)
         rows.append(np.hstack(tiles))
     img = np.vstack([rows[0], np.full((8, rows[0].shape[1], 3), 255, np.uint8), rows[1]])
