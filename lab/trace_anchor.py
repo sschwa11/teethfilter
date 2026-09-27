@@ -4,7 +4,8 @@ import dental as D
 key = sys.argv[1]; n_max = int(sys.argv[2]) if len(sys.argv) > 2 else 10 ** 9
 d = dict(np.load(f"cache/{key}.npz", allow_pickle=True))
 cap = cv2.VideoCapture(str(d["path"]))
-af = D.AnchorFill(offset=[-0.14, -13.71])
+import json
+af = D.AnchorFill(offset=json.load(open('../settings.json'))['anchor_offset'])
 for k, v in (a.split("=") for a in sys.argv[3:]):
     setattr(af, k, eval(v))
 orig_measure = af.et.measure

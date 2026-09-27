@@ -207,8 +207,8 @@ class AnchorFill:
         self.bottom_full = smooth_cols(np.interp(xs, xs[good], full[good]), 5).astype(np.float32)
         self.body_top = np.argmax(self.slot > 0.5, 0)
         ys, xs = np.nonzero(self.slot > 0.05)
-        self.roi = (max(int(ys.min()) - 2, 0), min(int(ys.max()) + 4, CH), max(int(xs.min()) - 2, 0), min(int(np.ceil(self.x_mid)) + 7, CW))
-        band = (np.abs(GX - self.x_mid) <= 5) & (GY >= self.roi[0]) & (GY < self.roi[1])
+        self.roi = (max(int(ys.min()) - 2, 0), min(int(ys.max()) + 4, CH), max(int(xs.min()) - 2, 0), min(int(np.ceil(self.x_mid)) + 15, CW))
+        band = (GX - self.x_mid >= -5) & (GX - self.x_mid <= 13) & (GY >= self.roi[0]) & (GY < self.roi[1])
         self.slot_lim = (self.slot > 0.05) | band
         self.xd_map = np.ascontiguousarray(np.broadcast_to((2 * self.x_mid - GX[0])[None, :], (CH, CW))).astype(np.float32)
         self.seg = Segmenter(seg_path)
@@ -230,6 +230,9 @@ class AnchorFill:
         self.live_ext = 6.0
         self.relock_conf = 0.12
         self.l_need = 1
+        self.keep_inner = True
+        self.seam_max = 16.0
+        self.min_comp = 20
         self.lower_axis = True
         self.l_bridge = 15
         self.occl = True
@@ -289,6 +292,7 @@ class AnchorFill:
         self.recent = []
         self.lax = None
         self.lax_hist = []
+        self.seam_s = 0.0
         self.light_rl = 1.0
         self.lcm_t = None
         self.lcm_b = None
@@ -312,11 +316,20 @@ class AnchorFill:
         if not os.path.exists(path):
             return False
         z = np.load(path)
-        if tuple(int(v) for v in z["roi"]) != tuple(self.roi):
+        q0, q1, p0, p1 = (int(v) for v in z["roi"])
+        r0, r1, c0, c1 = self.roi
+        y0, y1, x0, x1 = max(q0, r0), min(q1, r1), max(p0, c0), min(p1, c1)
+        if y1 - y0 < 10 or x1 - x0 < 10:
             return False
-        self.st_tex = z["st_tex"].astype(np.float32)
-        self.st_seen = np.minimum(z["st_seen"].astype(np.float32), 0.6)
-        self.st_sil = z["st_sil"].astype(np.float32)
+        h, w = r1 - r0, c1 - c0
+        self.st_tex = np.zeros((h, w, 3), np.float32)
+        self.st_seen = np.zeros((h, w), np.float32)
+        self.st_sil = np.zeros((h, w), np.float32)
+        dst = (slice(y0 - r0, y1 - r0), slice(x0 - c0, x1 - c0))
+        src = (slice(y0 - q0, y1 - q0), slice(x0 - p0, x1 - p0))
+        self.st_tex[dst] = z["st_tex"][src].astype(np.float32)
+        self.st_seen[dst] = np.minimum(z["st_seen"][src].astype(np.float32), 0.6)
+        self.st_sil[dst] = z["st_sil"][src].astype(np.float32)
         self.st_gain = np.ones(3, np.float32)
         return True
 
@@ -325,14 +338,19 @@ class AnchorFill:
         return self.et.off.copy()
 
     def clean_mouth(self, mouth, cp):
-        band = np.zeros((CH, CW), np.uint8)
-        cv2.fillPoly(band, [np.round(cp[INNER_POLY]).astype(np.int32)], 1)
-        band = cv2.dilate(band, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
+        poly = np.zeros((CH, CW), np.uint8)
+        cv2.fillPoly(poly, [np.round(cp[INNER_POLY]).astype(np.int32)], 1)
+        band = cv2.dilate(poly, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)))
         m = mouth * cv2.GaussianBlur(band.astype(np.float32), (0, 0), 2.0)
         n, labels, stats, _ = cv2.connectedComponentsWithStats((m > 0.5).astype(np.uint8), connectivity=8)
         if n > 2:
-            keep = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-            m = m * cv2.dilate((labels == keep).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(np.float32)
+            areas = stats[1:, cv2.CC_STAT_AREA]
+            keep = np.zeros(n, bool)
+            keep[1 + int(np.argmax(areas))] = True
+            if self.keep_inner:
+                inside = np.bincount(labels.ravel(), weights=poly.ravel().astype(np.float64), minlength=n)[1:]
+                keep[1:] |= (areas >= self.min_comp) & (inside >= 0.5 * areas)
+            m = m * cv2.dilate(keep[labels].astype(np.uint8), np.ones((5, 5), np.uint8)).astype(np.float32)
         return m
 
     def register(self, hp, mouth0):
@@ -482,7 +500,10 @@ class AnchorFill:
                 self.mouth_t = mouth.copy()
                 self.mouth_t[R] = mt
                 alpha = body * np.clip((mt - 0.3) / 0.4, 0, 1) * cover
-                tex, alpha = self.heal_seam(crop[R], tex, alpha, lt, self.x_mid - c0)
+                axis = self.x_mid - c0
+                if self.seam_max > 0:
+                    tex, alpha, axis = self.snap_seam(L[R], mouth[R], tex, alpha, lt, axis)
+                tex, alpha = self.heal_seam(crop[R], tex, alpha, lt, axis)
                 tex = np.where((alpha > 0)[..., None], tex, crop[R].astype(np.float32))
                 tex_full = crop.astype(np.float32)
                 tex_full[R] = tex
@@ -600,6 +621,36 @@ class AnchorFill:
         tex = (tex * (1 - blend) + ext * blend).astype(np.float32)
         cover = has[None, :] & (rows <= bot[None, :])
         return tex, cover.astype(np.float32) * np.clip(bot[None, :] + 0.5 - gy, 0, 1), has
+
+    def snap_seam(self, L, mouth, tex, alpha, lt, axis):
+        ia = int(round(axis))
+        hh, ww = alpha.shape
+        target = None
+        if lt > 0 and ia + 14 <= ww and ia - 3 >= 0:
+            ok = (alpha[:, ia - 3] > 0.5) & (mouth[:, ia + 6] > 0.5)
+            seg = L[:, ia - 2:ia + 14] >= 0.62 * lt
+            found = seg.any(1)
+            first = np.argmax(seg, 1) + ia - 2
+            good = ok & found & (first > ia - 2)
+            if good.sum() >= 4:
+                e = float(np.median(first[good])) - axis
+                target = float(np.clip(2.0 * (e - 0.5), 0.0, self.seam_max))
+        if target is None:
+            self.seam_s *= 0.9
+        else:
+            self.seam_s += float(np.clip(target - self.seam_s, -1.5, 1.5))
+        s_ = self.seam_s
+        if s_ < 0.3:
+            return tex, alpha, axis
+        xs = np.arange(ww, dtype=np.float32)
+        w = np.clip((xs - (axis - 66.0)) / 66.0, 0, 1)
+        mx = np.ascontiguousarray(np.broadcast_to((xs - s_ * w)[None, :], (hh, ww))).astype(np.float32)
+        my = np.ascontiguousarray(np.broadcast_to(np.arange(hh, dtype=np.float32)[:, None], (hh, ww))).astype(np.float32)
+        tex = cv2.remap(tex, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        alpha = cv2.remap(alpha.astype(np.float32), mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        edge = axis + s_ / 2.0
+        alpha = alpha * np.clip(edge + 0.5 - np.arange(ww, dtype=np.float32), 0, 1)[None, :]
+        return tex, alpha, edge
 
     def extend_dark(self, mouth, L, lt, inb, reach=12):
         if lt <= 0:

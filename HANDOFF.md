@@ -95,6 +95,11 @@ v35: on your 10-05-06 recording (live v34), frames where the lower gap still sho
 
 v36: the lower fill fades out over 6 px where the mirrored teeth end, instead of stopping in a hard, squared-off edge (`l_feather`). Where the opening it shows through is much thinner than the teeth, it is shaded up to 30% darker (`l_slit`), so thin slivers no longer look like bright shards. Gap metric on four recordings: 9.3% of frames vs 9.0% for v35, i.e. neutral. A left/right lighting match (`l_light`) was tried and rejected: your side lighting changes between sessions and the estimate was too noisy (gap 11.7%, more jitter).
 
+v37 (upper teeth flicker, gap between the front teeth):
+- **Tongue:** the mouth-outline model treats your tongue as "not mouth", so with your tongue up the detected opening split in two. The cleanup kept only the biggest piece, and when that was the lower one, the upper fill vanished for a frame. It now keeps every piece inside your lip outline.
+- **Gap between the front teeth:** when the mouth is barely open, the tracker can go 40+ frames without a confident reading and drift 3–6 px. Because the fill is a mirror image, that shows up as a dark gap twice as wide between the filled tooth and your real one. Each frame, the filter now finds where your real tooth actually starts and stretches the fill to meet it (`seam_max`).
+- **Result** (`lab/seam_gap.py`): frames with a gap of 3 px or more fell from 4.7% to 1.9% (26 Sep recording) and from 6.3% to 4.1% (25 Sep). Single-frame upper dropouts with the tongue up are gone. Lower teeth unchanged.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).
