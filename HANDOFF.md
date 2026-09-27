@@ -100,6 +100,12 @@ v37 (upper teeth flicker, gap between the front teeth):
 - **Gap between the front teeth:** when the mouth is barely open, the tracker can go 40+ frames without a confident reading and drift 3–6 px. Because the fill is a mirror image, that shows up as a dark gap twice as wide between the filled tooth and your real one. Each frame, the filter now finds where your real tooth actually starts and stretches the fill to meet it (`seam_max`).
 - **Result** (`lab/seam_gap.py`): frames with a gap of 3 px or more fell from 4.7% to 1.9% (26 Sep recording) and from 6.3% to 4.1% (25 Sep). Single-frame upper dropouts with the tongue up are gone. Lower teeth unchanged.
 
+v38 (tongue flicker): with your tongue raised and touching the backs of your upper teeth, the mouth-outline model sometimes marks only fragments of the opening near the teeth, and some frames it marks none of it. The upper fill then blinked on and off, or was cut into a notch where the tongue was. Two fixes:
+- Tongue-shaped holes in the mouth outline no longer cut the upper fill. The fill covers everything between the top and the bottom of the opening in each column.
+- When the upper part of the opening suddenly nearly disappears while your lip outline stays about the same, the filter keeps the previous frame's opening for up to 10 frames (`drop_hold`).
+
+On your tongue recording (00-24-05), complete one-frame dropouts of the upper fill fell from 17 to 3. Frame-to-frame changes in the fill's shape dropped about 15-25% on the talking recordings. Seams and the lower teeth are unchanged.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).

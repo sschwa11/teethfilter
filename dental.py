@@ -210,6 +210,7 @@ class AnchorFill:
         self.roi = (max(int(ys.min()) - 2, 0), min(int(ys.max()) + 4, CH), max(int(xs.min()) - 2, 0), min(int(np.ceil(self.x_mid)) + 15, CW))
         band = (GX - self.x_mid >= -5) & (GX - self.x_mid <= 13) & (GY >= self.roi[0]) & (GY < self.roi[1])
         self.slot_lim = (self.slot > 0.05) | band
+        self.upper_zone = ((GY <= self.bottom_full[None, :] + 6) & (GX >= self.x_mid - 75) & (GX <= self.x_mid + 40)).astype(np.uint8)
         self.xd_map = np.ascontiguousarray(np.broadcast_to((2 * self.x_mid - GX[0])[None, :], (CH, CW))).astype(np.float32)
         self.seg = Segmenter(seg_path)
         self.edge_x0 = float(z["x_mid"]) + float(z["edge_offset"])
@@ -232,6 +233,9 @@ class AnchorFill:
         self.l_need = 1
         self.keep_inner = True
         self.seam_max = 16.0
+        self.tongue_fill = True
+        self.drop_hold = 10
+        self.drop_lo = 0.7
         self.min_comp = 20
         self.lower_axis = True
         self.l_bridge = 15
@@ -293,6 +297,10 @@ class AnchorFill:
         self.lax = None
         self.lax_hist = []
         self.seam_s = 0.0
+        self.mh_prev = None
+        self.mh_area = 0.0
+        self.mh_cov = 0.0
+        self.mh_n = 0
         self.light_rl = 1.0
         self.lcm_t = None
         self.lcm_b = None
@@ -497,6 +505,10 @@ class AnchorFill:
                 if self.live_ext > 0:
                     tex, cover = self.extend_live(tex, cover, live, raw_bot, cap + self.live_ext, has & has_st, rows, gy)
                 mt = self.extend_dark(mouth[R], L[R], lt, inb)
+                if self.tongue_fill:
+                    full = mouth[:, c0:c1].copy()
+                    full[r0:r1] = mt
+                    mt = self.fill_spans(full)[r0:r1]
                 self.mouth_t = mouth.copy()
                 self.mouth_t[R] = mt
                 alpha = body * np.clip((mt - 0.3) / 0.4, 0, 1) * cover
@@ -621,6 +633,37 @@ class AnchorFill:
         tex = (tex * (1 - blend) + ext * blend).astype(np.float32)
         cover = has[None, :] & (rows <= bot[None, :])
         return tex, cover.astype(np.float32) * np.clip(bot[None, :] + 0.5 - gy, 0, 1), has
+
+    def guard_dropout(self, mouth0, cp):
+        poly = np.zeros((CH, CW), np.uint8)
+        cv2.fillPoly(poly, [np.round(cp[INNER_POLY]).astype(np.int32)], 1)
+        poly &= self.upper_zone
+        area = float(poly.sum())
+        cov = float(((mouth0 > 0.5) & (poly > 0)).sum()) / max(area, 1.0)
+        prev = self.mh_prev
+        if prev is not None and area > 150:
+            steady = self.drop_lo <= area / max(self.mh_area, 1.0) <= 1.0 / self.drop_lo
+            if steady and self.mh_n < self.drop_hold and self.mh_cov > 0.2 and cov < 0.5 * self.mh_cov:
+                self.mh_n += 1
+                lim = cv2.dilate(poly, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))).astype(np.float32)
+                return np.maximum(mouth0, prev * lim * self.upper_zone).astype(np.float32)
+        self.mh_prev = mouth0.copy()
+        self.mh_area = area
+        self.mh_cov = cov
+        self.mh_n = 0
+        return mouth0
+
+    def fill_spans(self, mt):
+        m = mt > 0.5
+        has = m.any(0)
+        if not has.any():
+            return mt
+        hh = m.shape[0]
+        top = np.argmax(m, 0)
+        bot = hh - 1 - np.argmax(m[::-1], 0)
+        ry = np.arange(hh)[:, None]
+        span = has[None, :] & (ry >= top[None, :]) & (ry <= bot[None, :])
+        return np.where(span, np.maximum(mt, 1.0), mt).astype(np.float32)
 
     def snap_seam(self, L, mouth, tex, alpha, lt, axis):
         ia = int(round(axis))
@@ -928,6 +971,8 @@ class AnchorFill:
         crop0 = cv2.warpAffine(frame, a0.astype(np.float32), (CW, CH), flags=flags, borderMode=cv2.BORDER_REPLICATE)
         cp0 = to_crop(a0, pts)
         mouth0 = self.clean_mouth(self.seg(crop0), cp0)
+        if self.drop_hold > 0:
+            mouth0 = self.guard_dropout(mouth0, cp0)
         L0 = cv2.GaussianBlur(cv2.cvtColor(crop0, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32), (0, 0), 0.8)
         self.anchor(a0, L0, mouth0)
         a = a0.copy()
