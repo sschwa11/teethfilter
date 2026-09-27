@@ -93,6 +93,8 @@ Measured on your last three recordings (`lab/lower_blink.py`), frames where the 
 
 v35: on your 10-05-06 recording (live v34), frames where the lower gap still shows were 5.4% (v28 on the same clip: 9.2%). A blind defect review found the most common remaining flaw was a thin too-white crescent along the bottom of the lower fill where it meets the lip. The bottom 4 px of the lower fill are now shaded up to 25% (`l_lip_shade`). Still seen: a one-frame dark notch below the filled lateral when the mouth is barely open (it mirrors the real dark space on the other side), and faint/streaky upper fill in nearly closed slits.
 
+v36: the lower fill fades out over 6 px where the mirrored teeth end, instead of stopping in a hard, squared-off edge (`l_feather`). Where the opening it shows through is much thinner than the teeth, it is shaded up to 30% darker (`l_slit`), so thin slivers no longer look like bright shards. Gap metric on four recordings: 9.3% of frames vs 9.0% for v35, i.e. neutral. A left/right lighting match (`l_light`) was tried and rejected: your side lighting changes between sessions and the estimate was too noisy (gap 11.7%, more jitter).
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).

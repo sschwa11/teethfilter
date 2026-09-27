@@ -247,6 +247,10 @@ class AnchorFill:
         self.l_span = 76
         self.l_fade = 0.0
         self.l_lip_shade = 0.25
+        self.l_feather = 6.0
+        self.l_light = 0.0
+        self.l_slit = 0.3
+        self.light_cols = (68, 90)
         self.lax_step = 0.5
         self.rise_l = 1.0
         self.stable = True
@@ -285,6 +289,7 @@ class AnchorFill:
         self.recent = []
         self.lax = None
         self.lax_hist = []
+        self.light_rl = 1.0
         self.lcm_t = None
         self.lcm_b = None
         self.lcm_age = None
@@ -719,6 +724,18 @@ class AnchorFill:
         self.lcm_age = np.where(valid, 0, self.lcm_age + 1).astype(np.int32)
         return t_s, b_s, valid | keep
 
+    def update_light(self, L, mouth):
+        xm = int(self.x_mid)
+        inm = mouth > 0.5
+        ry = np.arange(CH)[:, None]
+        ub = np.where(inm.any(0), np.argmax(inm, 0), CH)
+        up = inm & (ry < self.bottom_full[None, :]) & (ry > ub[None, :])
+        a0, a1 = self.light_cols
+        lm, rm = up[:, xm - a1:xm - a0], up[:, xm + a0:xm + a1]
+        if lm.sum() > 30 and rm.sum() > 30:
+            r = float(np.percentile(L[:, xm + a0:xm + a1][rm], 85) / max(np.percentile(L[:, xm - a1:xm - a0][lm], 85), 1.0))
+            self.light_rl += 0.1 * (float(np.clip(r, 0.5, 1.2)) - self.light_rl)
+
     def lower_fill(self, crop, L, mouth, span=64):
         xm = self.x_mid
         inm = mouth > 0.5
@@ -790,13 +807,19 @@ class AnchorFill:
         if self.l_hold > 0:
             t_s, b_s, valid = self.lower_col_memory(t_s, b_s, valid, xs, xm, span)
         low = np.maximum(np.where(valid, t_s, CH) - 0.5, self.bottom_full + 1.0)
+        feather = np.ones(CW, np.float32)
+        if self.l_feather > 0 and valid.any():
+            v8 = np.pad(valid.astype(np.uint8), 1).reshape(1, -1)
+            dist = cv2.distanceTransform(np.ascontiguousarray(v8), cv2.DIST_L1, 3).ravel()[1:-1]
+            right = xs > xm + self.l_edge_fill + 2
+            feather = np.where(right, np.clip(dist / self.l_feather, 0, 1), 1.0).astype(np.float32)
         taper = np.clip((xm + span - xs) / 10.0, 0, 1) * np.clip((xs - xm) / 1.5, 0, 1)
         xa, xb = max(int(xm) - 10, 0), min(int(np.ceil(xm + span)) + 4, CW)
         ya = max(int(np.floor(low[xa:xb].min())) - 4, 0)
         if ya >= CH - 1:
             return None
         B = (slice(ya, CH), slice(xa, xb))
-        alpha_b = np.clip((GY[B] - low[None, xa:xb]) / 1.5, 0, 1) * np.clip((mouth[B] - 0.15) / 0.3, 0, 1) * (valid * taper)[None, xa:xb]
+        alpha_b = np.clip((GY[B] - low[None, xa:xb]) / 1.5, 0, 1) * np.clip((mouth[B] - 0.15) / 0.3, 0, 1) * (valid * taper * feather)[None, xa:xb]
         mapy = np.minimum(GY[B], np.nan_to_num(b_s[xa:xb], nan=CH)[None, :]).astype(np.float32)
         xd_row = 2 * xm - xs[xa:xb].astype(np.float32)
         if self.l_src_fix and (~ok).any():
@@ -811,8 +834,16 @@ class AnchorFill:
             xd_row = xd_row + shift[di]
         xd = np.ascontiguousarray(np.broadcast_to(xd_row[None, :], (CH - ya, xb - xa))).astype(np.float32)
         tex_b = cv2.remap(crop, xd, mapy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
-        if self.l_fade > 0 or self.l_lip_shade > 0:
+        if self.l_fade > 0 or self.l_lip_shade > 0 or self.l_light > 0 or self.l_slit > 0:
             shade = 1 - self.l_fade * np.clip((xs[xa:xb] - xm) / span, 0, 1)[None, :]
+            if self.l_light > 0:
+                shade = shade * min(1.0, max(self.light_rl, 0.6)) ** self.l_light
+            if self.l_slit > 0:
+                ob = mouth[B] > 0.5
+                h_t = ob.sum(0).astype(np.float32)
+                h_d = np.nan_to_num(b_s[xa:xb] - t_s[xa:xb], nan=0.0).astype(np.float32)
+                slit = np.where(h_d > 3, np.clip(h_t / np.maximum(h_d, 1) , 0, 1), 1.0)
+                shade = shade * (1 - self.l_slit * (1 - slit))[None, :]
             on = alpha_b > 0.5
             bot_r = np.where(on.any(0), on.shape[0] - 1 - np.argmax(on[::-1], 0), -1)
             ry = np.arange(on.shape[0])[:, None]
@@ -874,6 +905,8 @@ class AnchorFill:
         else:
             self.au_prev = None
         if self.lower and gate > 0:
+            if self.l_light > 0:
+                self.update_light(L, mouth)
             lf = self.lower_fill(crop, L, mouth, span=self.l_span)
             raw_l = np.zeros((CH, CW), np.float32)
             if lf is not None:
