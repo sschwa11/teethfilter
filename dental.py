@@ -236,6 +236,14 @@ class AnchorFill:
         self.tongue_fill = True
         self.drop_hold = 10
         self.drop_lo = 0.7
+        self.band_rescue = False
+        self.band_open = 18.0
+        self.band_min = 8
+        self.band_cov = 0.35
+        self.band_hold = 5
+        self.band_span = 12
+        self.band_hits = 0
+        self.lm_open = 0.0
         self.min_comp = 20
         self.lower_axis = True
         self.l_bridge = 15
@@ -302,6 +310,8 @@ class AnchorFill:
         self.mh_cov = 0.0
         self.mh_n = 0
         self.mh_rest = 0.0
+        self.band_mem = None
+        self.band_age = 0
         self.light_rl = 1.0
         self.lcm_t = None
         self.lcm_b = None
@@ -510,6 +520,13 @@ class AnchorFill:
                     full = mouth[:, c0:c1].copy()
                     full[r0:r1] = mt
                     mt = self.fill_spans(full)[r0:r1]
+                if self.band_rescue:
+                    resc = self.rescue_band(L, mouth)[R]
+                    if resc.any():
+                        use = (resc > 0.5) & (mt < 0.5)
+                        tex = np.where(use[..., None], live, tex).astype(np.float32)
+                        cover = np.maximum(cover, resc)
+                        mt = np.maximum(mt, resc)
                 self.mouth_t = mouth.copy()
                 self.mouth_t[R] = mt
                 alpha = body * np.clip((mt - 0.3) / 0.4, 0, 1) * cover
@@ -658,6 +675,56 @@ class AnchorFill:
         self.mh_cov = cov
         self.mh_n = 0
         return mouth0
+
+    def rescue_band(self, L, mouth):
+        out = np.zeros((CH, CW), np.float32)
+        if self.lm_open < self.band_open:
+            self.band_mem = None
+            return out
+        xm = self.x_mid
+        xs = np.arange(int(np.ceil(xm)) + 3, min(int(xm) + 60, CW - 1))
+        tops = np.full(xs.size, np.nan, np.float32)
+        for i, x in enumerate(xs):
+            b0 = int(round(self.bottom_full[x]))
+            if b0 - 30 < 0 or b0 + 12 >= CH:
+                continue
+            col = L[:, x]
+            p = b0 - 14 + int(np.argmax(col[b0 - 14:b0 + 3]))
+            lp = float(col[p])
+            if lp < 40 or float(col[b0 + 3:b0 + 10].mean()) > 0.75 * lp or mouth[b0 + 2:min(b0 + 60, CH), x].max() < 0.5:
+                continue
+            a = p
+            while a - 1 > b0 - 24 and col[a - 1] >= 0.8 * lp:
+                a -= 1
+            b = p
+            while b + 1 < b0 + 6 and col[b + 1] >= 0.8 * lp:
+                b += 1
+            if abs(b - b0) > 5 or float(mouth[a:b + 1, x].mean()) > self.band_cov:
+                continue
+            v = a - 5 + int(np.argmin(col[a - 5:a]))
+            if col[v] > 0.7 * lp or float(col[max(v - 10, 0):max(v - 3, 1)].mean()) < 0.7 * lp:
+                continue
+            tops[i] = a
+        ok = np.isfinite(tops)
+        if ok.sum() >= self.band_min and np.ptp(xs[ok]) >= self.band_span:
+            xo = xs[ok]
+            to = smooth_cols(tops[ok], 5)
+            xr = np.arange(xo.min(), xo.max() + 1)
+            self.band_mem = (xr, np.interp(xr, xo, to))
+            self.band_age = 0
+            self.band_hits += 1
+        elif self.band_mem is not None and self.band_age < self.band_hold:
+            self.band_age += 1
+        else:
+            self.band_mem = None
+            return out
+        xr, tr = self.band_mem
+        for x, top in zip(xr, tr):
+            xt = 2 * xm - x
+            for xx in (int(np.floor(xt)), int(np.ceil(xt))):
+                if 0 <= xx < CW:
+                    out[int(round(top)):int(round(self.bottom_full[xx])) + 2, xx] = 1.0
+        return out
 
     def fill_spans(self, mt):
         m = mt > 0.5
@@ -986,6 +1053,7 @@ class AnchorFill:
         crop = cv2.warpAffine(frame, a.astype(np.float32), (CW, CH), flags=flags, borderMode=cv2.BORDER_REPLICATE)
         mouth = shift_img(mouth0, self.delta, cv2.BORDER_CONSTANT)
         cp = cp0 - self.delta
+        self.lm_open = float(np.linalg.norm(cp[13] - cp[14]))
         yu = np.interp(np.arange(CW), *zip(*sorted(cp[UPPER_INNER].tolist())))
         yl = np.interp(np.arange(CW), *zip(*sorted(cp[LOWER_INNER].tolist())))
         gate = float(np.clip(self.locks / 3.0, 0, 1))

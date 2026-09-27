@@ -106,6 +106,13 @@ v38 (tongue flicker): with your tongue raised and touching the backs of your upp
 
 On your tongue recording (00-24-05), complete one-frame dropouts of the upper fill fell from 17 to 3. Frame-to-frame changes in the fill's shape there dropped 28%. The other recordings are unchanged, since the hold only kicks in with the tongue up. Seams and the lower teeth are also unchanged.
 
+v39 (retrained mouth-outline model): the small model that finds the mouth opening had only been trained on recordings up to 23 Sep. Those had almost no tongue or head-down footage, so it labelled a raised tongue as lip, which caused the v37/v38 tongue flicker. It was retrained on all 27 usable recordings (`teeth_seg.onnx`). Two clips it never saw were held back for testing:
+- On the tongue clip (00-24-05), agreement with the reference labels rose from 69% to 96%. Complete upper-fill dropouts went from 3 to 0.
+- On the head-down clip (01-10-00), agreement rose from 55% to 93%, and the error at the upper lip edge fell from 12 px to 4 px.
+- The lower-teeth gap and the front-teeth seam are unchanged or slightly better on four other recordings.
+
+Still known: with your head tilted well down and your mouth wide open, the upper teeth show only as a thin strip under the lip. Even the large reference models label that strip as lip, so the filled tooth can still be missing there. A detector that mirrors your visible real tooth into the gap in that case (`band_rescue`) exists but is off: it only triggered in some frames, so it made a small patch blink. Keeping the camera at eye level avoids the problem.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).
@@ -142,7 +149,7 @@ Run from `lab/` with the venv (`..\.venv\Scripts\python.exe <script>`). The cach
 1. `bootstrap_cache.py`: extracts the skull reference shape from `teeth_model.npz` (only needed on a fresh clone).
 2. `cache_landmarks.py`: MediaPipe landmarks for every `recordings/*_raw.mp4`. It also reads four OBS clips from `%USERPROFILE%\Videos` if present; those aren't in the repo.
 3. `teacher_labels.py`: runs the SegFormer + BiSeNet face parsers (downloaded from Hugging Face on first use, ~140 MB) on every 2nd frame. About 15 min.
-4. `train_seg.py --out seg_w16`: trains the mouth segmenter. About 40 min. Don't run another GPU job at the same time: 10 GB fills up and everything slows 10x.
+4. `train_seg.py --out seg_w16`: trains the mouth segmenter. About 40-80 min. The clips in `VAL_KEYS` are held out for testing; `eval_seg.py <keys> <model names>` compares models per clip. Don't run another GPU job at the same time: 10 GB fills up and everything slows 10x.
 5. `export_seg.py seg_w16`: exports to ONNX.
 6. `build_atlas3.py` then `make_model_c.py`: rebuild the dental geometry.
 7. `package_model.py seg_w16`: writes `teeth_model.npz` + `teeth_seg.onnx` to the project root.

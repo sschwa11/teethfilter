@@ -11,7 +11,7 @@ import torch.nn.functional as F
 import common as C
 from seg_model import SegNet
 
-VAL_KEYS = ["2026-09-23_05-47-17_raw", "2026-09-22_23-36-51_raw"]
+VAL_KEYS = ["2026-09-23_05-47-17_raw", "2026-09-22_23-36-51_raw", "2026-09-27_00-24-05_raw", "2026-09-27_01-10-00_raw"]
 
 
 def load(keys):
