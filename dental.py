@@ -198,19 +198,17 @@ class AnchorFill:
         self.df = DentalFrame(z["ref_shape"].astype(np.float64), z["rigid_idx"])
         self.x_mid = float(z["x_mid"]) + axis_shift
         self.bottom = z["bottom"].astype(np.float32)
-        self.slot = z["slot"].astype(np.float32) * np.clip((GX - (float(z["x_mid"]) - 66.0)) / 10.0, 0, 1)
+        self.slot_model = z["slot"].astype(np.float32)
+        self.x_mid0 = float(z["x_mid"])
         self.donor_mask = z["donor_mask"] > 0.5
         xs = np.arange(CW)
-        mir = np.interp(2 * self.x_mid - xs, xs, self.bottom, left=0, right=0)
-        full = np.where(xs < self.x_mid, mir, self.bottom)
-        good = full > 0
+        vx = np.flatnonzero(self.bottom > 0)
+        mir = np.interp(2 * self.x_mid - xs, vx, self.bottom[vx], left=np.nan, right=np.nan)
+        full = np.where(xs < self.x_mid, mir, np.where(self.bottom > 0, self.bottom, np.nan))
+        good = np.isfinite(full)
         self.bottom_full = smooth_cols(np.interp(xs, xs[good], full[good]), 5).astype(np.float32)
-        self.body_top = np.argmax(self.slot > 0.5, 0)
-        ys, xs = np.nonzero(self.slot > 0.05)
-        self.roi = (max(int(ys.min()) - 2, 0), min(int(ys.max()) + 4, CH), max(int(xs.min()) - 2, 0), min(int(np.ceil(self.x_mid)) + 15, CW))
-        band = (GX - self.x_mid >= -5) & (GX - self.x_mid <= 13) & (GY >= self.roi[0]) & (GY < self.roi[1])
-        self.slot_lim = (self.slot > 0.05) | band
-        self.upper_zone = ((GY <= self.bottom_full[None, :] + 6) & (GX >= self.x_mid - 75) & (GX <= self.x_mid + 40)).astype(np.uint8)
+        self._slot_w = 88.0
+        self._build_slot()
         self.xd_map = np.ascontiguousarray(np.broadcast_to((2 * self.x_mid - GX[0])[None, :], (CH, CW))).astype(np.float32)
         self.seg = Segmenter(seg_path)
         self.edge_x0 = float(z["x_mid"]) + float(z["edge_offset"])
@@ -259,7 +257,13 @@ class AnchorFill:
         self.l_need_gap = 0.15
         self.fall_l_none = 0.34
         self.l_near = 12
-        self.l_span = 76
+        self.l_span = 100
+        self.arch_on = True
+        self.arch_a = 0.0055
+        self.arch_al = 0.0055
+        self.arch_max = 110.0
+        self.arch_k = 0.5
+        self.dz_cache = None
         self.l_fade = 0.0
         self.l_lip_shade = 0.25
         self.l_feather = 6.0
@@ -277,6 +281,79 @@ class AnchorFill:
         self.debug = False
         self.dbg = None
         self.reset(offset)
+
+    @property
+    def slot_w(self):
+        return self._slot_w
+
+    @slot_w.setter
+    def slot_w(self, v):
+        self._slot_w = float(v)
+        self._build_slot()
+
+    def _build_slot(self):
+        old = getattr(self, "roi", None)
+        self.slot = self.slot_model * np.clip((GX - (self.x_mid0 - self._slot_w)) / 10.0, 0, 1)
+        self.body_top = np.argmax(self.slot > 0.5, 0)
+        ys, xs = np.nonzero(self.slot > 0.05)
+        self.roi = (max(int(ys.min()) - 2, 0), min(int(ys.max()) + 4, CH), max(int(xs.min()) - 2, 0), min(int(np.ceil(self.x_mid)) + 15, CW))
+        band = (GX - self.x_mid >= -5) & (GX - self.x_mid <= 13) & (GY >= self.roi[0]) & (GY < self.roi[1])
+        self.slot_lim = (self.slot > 0.05) | band
+        self.slot_lim_f = self.slot_lim.astype(np.float32)
+        self.slot_lo_f = (self.slot > 0.05).astype(np.float32)
+        self.upper_zone = ((GY <= self.bottom_full[None, :] + 6) & (GX >= self.x_mid - self._slot_w - 9) & (GX <= self.x_mid + 40)).astype(np.uint8)
+        if old is not None and old != self.roi and getattr(self, "st_tex", None) is not None:
+            self.st_tex = self._move(self.st_tex, old, 0.0)
+            self.st_seen = self._move(self.st_seen, old, 0.0)
+            self.st_sil = self._move(self.st_sil, old, 0.0)
+            self.st_shade = None
+
+    def _move(self, arr, old, fill):
+        q0, q1, p0, p1 = old
+        r0, r1, c0, c1 = self.roi
+        out = np.full((r1 - r0, c1 - c0) + arr.shape[2:], fill, np.float32)
+        y0, y1, x0, x1 = max(q0, r0), min(q1, r1), max(p0, c0), min(p1, c1)
+        if y1 > y0 and x1 > x0:
+            out[y0 - r0:y1 - r0, x0 - c0:x1 - c0] = arr[y0 - q0:y1 - q0, x0 - p0:x1 - p0]
+        return out
+
+    def head_w(self, pose):
+        s, r, t = pose
+        ez = np.cross(self.df.ex, self.df.ey)
+        r2 = (r @ np.stack([self.df.ex, self.df.ey], 1))[:2]
+        return np.linalg.solve(r2, (r @ ez)[:2])
+
+    def arch_solve(self, ur, a, wx):
+        m = self.arch_max
+        if abs(wx) < 1e-6:
+            return ur.astype(np.float64)
+        disc = np.maximum(1 + 4 * a * wx * ur, 0.05)
+        x = (-1 + np.sqrt(disc)) / (2 * a * wx)
+        return np.where(np.abs(x) > m, ur - a * m * m * wx, x)
+
+    def arch_maps(self):
+        wx, wy = self.w_s
+        a, m = self.arch_a, self.arch_max
+        xc = np.clip(GX - self.x_mid, -m, m)
+        dz = a * xc * xc
+        fx = (GX + dz * wx).astype(np.float32)
+        fy = (GY + dz * wy).astype(np.float32)
+        xi = self.arch_solve(GX[0] - self.x_mid, a, wx)
+        dzi = a * np.clip(xi, -m, m) ** 2
+        ix = np.ascontiguousarray(np.broadcast_to((self.x_mid + xi)[None, :], (CH, CW))).astype(np.float32)
+        iy = (GY - dzi[None, :] * wy).astype(np.float32)
+        return fx, fy, ix, iy
+
+    def arch_pad(self):
+        if not self.arch_on or self.w_s is None:
+            return 0
+        return int(np.ceil(2 * self.arch_al * self.l_span ** 2 * abs(self.w_s[0]))) + 2
+
+    def lower_donor(self, xs, xm):
+        if not self.arch_on or self.w_s is None:
+            return 2 * xm - xs
+        x = self.arch_solve(xs - xm, self.arch_al, self.w_s[0])
+        return xs - 2 * x
 
     def reset(self, offset=None):
         self.et = EdgeTracker(self.edge_x0, float(self.bottom[int(self.x_mid) + 18]))
@@ -304,6 +381,8 @@ class AnchorFill:
         self.recent = []
         self.lax = None
         self.lax_hist = []
+        self.w_s = None
+        self.lim_slot_c = None
         self.seam_s = 0.0
         self.mh_prev = None
         self.mh_area = 0.0
@@ -475,6 +554,49 @@ class AnchorFill:
         return a, a
 
     def upper_fill(self, crop, L, mouth):
+        self.lim_slot_c = None
+        if not self.arch_on or self.w_s is None:
+            return self._upper_fill(crop, L, mouth)
+        wx, wy = float(self.w_s[0]), float(self.w_s[1])
+        r0, r1, c0, c1 = self.roi
+        fa = max(c0 - 2, 0)
+        fb = min(max(c1 + (60 if self.band_rescue else 2), int(np.ceil(2 * self.x_mid - c0)) + 3), CW)
+        key = (fa, fb, self.arch_a, self.arch_max, self.x_mid)
+        if self.dz_cache is None or self.dz_cache[0] != key:
+            xc = np.clip(GX[:, fa:fb] - self.x_mid, -self.arch_max, self.arch_max)
+            self.dz_cache = (key, (self.arch_a * xc * xc).astype(np.float32))
+        dz = self.dz_cache[1]
+        fx = GX[:, fa:fb] + dz * wx
+        fy = GY[:, fa:fb] + dz * wy
+        ra, rb = max(r0 - 2, 0), min(r1 + 2, CH)
+        crop_f = crop.copy()
+        crop_f[ra:rb, fa:fb] = cv2.remap(crop, fx[ra:rb], fy[ra:rb], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        L_f = L.copy()
+        L_f[ra:rb, fa:fb] = cv2.remap(L, fx[ra:rb], fy[ra:rb], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        mouth_f = mouth.copy()
+        mouth_f[:, fa:fb] = cv2.remap(mouth, fx, fy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        tex_f, alpha_f = self._upper_fill(crop_f, L_f, mouth_f)
+        pad = int(np.ceil(self.arch_a * self.arch_max ** 2 * max(abs(wx), abs(wy)))) + 3
+        ya, yb, xa, xb = max(r0 - pad, 0), min(r1 + pad, CH), max(c0 - pad, 0), min(c1 + pad, CW)
+        xi = self.arch_solve(np.arange(xa, xb) - self.x_mid, self.arch_a, wx)
+        dzi = self.arch_a * np.clip(xi, -self.arch_max, self.arch_max) ** 2
+        ix = np.ascontiguousarray(np.broadcast_to((self.x_mid + xi).astype(np.float32)[None, :], (yb - ya, xb - xa)))
+        iy = (GY[ya:yb, xa:xb] - dzi[None, :] * wy).astype(np.float32)
+        B = (slice(ya, yb), slice(xa, xb))
+        alpha = np.zeros((CH, CW), np.float32)
+        alpha[B] = cv2.remap(alpha_f, ix, iy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        blk = cv2.remap(tex_f, ix, iy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        tex = crop.astype(np.float32)
+        tex[B] = np.where((alpha[B] > 0)[..., None], blk, tex[B])
+        blk_m = cv2.remap(self.mouth_t, ix, iy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        self.mouth_t[B] = blk_m
+        lim = self.slot_lim_f if self.seam_band else self.slot_lo_f
+        lc = np.zeros((CH, CW), bool)
+        lc[B] = cv2.remap(lim, ix, iy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
+        self.lim_slot_c = lc
+        return tex, alpha
+
+    def _upper_fill(self, crop, L, mouth):
         r0, r1, c0, c1 = self.roi
         R = (slice(r0, r1), slice(c0, c1))
         h = r1 - r0
@@ -921,7 +1043,7 @@ class AnchorFill:
         if self.lower_axis:
             xm = self.find_lower_axis(L, inm, thr)
             thr = self.l_thr
-            cols = np.arange(int(xm - span), int(xm))
+            cols = np.arange(max(int(xm - span - self.arch_pad()), 0), int(xm))
         if self.l_need_gap > 0:
             tc = np.arange(int(xm) + 2, min(int(xm) + 30, CW))
             tin = inm[:, tc]
@@ -958,7 +1080,8 @@ class AnchorFill:
         top_l[cols[okb]] = t[okb]
         bot_l[cols[okb]] = b[okb]
         xs = np.arange(CW)
-        xdi = np.clip(np.round(2 * xm - xs).astype(int), 0, CW - 1)
+        xdf = self.lower_donor(xs.astype(np.float64), xm)
+        xdi = np.clip(np.round(xdf).astype(int), 0, CW - 1)
         in_span = (xs > xm) & (xs < xm + span)
         t_s = np.where(in_span, top_l[xdi], np.nan)
         b_s = np.where(in_span, bot_l[xdi], np.nan)
@@ -988,7 +1111,7 @@ class AnchorFill:
         B = (slice(ya, CH), slice(xa, xb))
         alpha_b = np.clip((GY[B] - low[None, xa:xb]) / 1.5, 0, 1) * np.clip((mouth[B] - 0.15) / 0.3, 0, 1) * (valid * taper * feather)[None, xa:xb]
         mapy = np.minimum(GY[B], np.nan_to_num(b_s[xa:xb], nan=CH)[None, :]).astype(np.float32)
-        xd_row = 2 * xm - xs[xa:xb].astype(np.float32)
+        xd_row = xdf[xa:xb].astype(np.float32)
         if self.l_src_fix and (~ok).any():
             okidx = np.flatnonzero(ok)
             k = np.arange(len(cols))
@@ -1039,6 +1162,8 @@ class AnchorFill:
 
     def process(self, frame, pts):
         pose = self.df.pose(pts)
+        w = np.clip(self.head_w(pose), -0.4, 0.4)
+        self.w_s = w if self.w_s is None else (1 - self.arch_k) * self.w_s + self.arch_k * w
         a0 = self.df.affine(pose)
         flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
         crop0 = cv2.warpAffine(frame, a0.astype(np.float32), (CW, CH), flags=flags, borderMode=cv2.BORDER_REPLICATE)
@@ -1066,6 +1191,8 @@ class AnchorFill:
         if self.upper and gate > 0:
             tex_u, raw_u = self.upper_fill(crop, L, mouth)
             lim_slot = self.slot_lim if self.seam_band else (self.slot > 0.05)
+            if self.lim_slot_c is not None:
+                lim_slot = self.lim_slot_c
             alpha_u, self.au_prev = self.hold(raw_u * gate, self.au_prev, np.clip((self.mouth_t - 0.3) / 0.4, 0, 1) * lim_slot, rise=self.rise_u)
             if self.mem is not None and not self.stable:
                 r0, r1, c0, c1 = self.roi

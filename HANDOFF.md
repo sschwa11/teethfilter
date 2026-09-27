@@ -46,6 +46,9 @@ Everything is in `dental.py`. Its tunables are attributes on `AnchorFill`:
 - `gain_lo`/`gain_hi`/`gain_k`: brightness-matching limits and speed (0.4 / 1.8 / 0.7).
 - `rise_u`: how fast the upper fill appears (1.0 = instantly).
 - `seam_band`: seam healing on/off.
+- `slot_w`: how far the upper fill reaches from the midline (88 px = central, lateral and canine).
+- `l_span`: how far the lower fill reaches from the lower midline (100 px).
+- `arch_on`, `arch_a`: head-turn correction on/off and the curvature of the jaw it assumes (0.0055).
 - `robust`, `max_step`, `use_reg`: tracking (median gating on, 1.5 px/frame cap, registration off).
 - `live_ext`: how far below the model's tooth edge the fill may follow your real tooth (6 px).
 - `stable = False` goes back to the per-frame live mirror (v13 behaviour).
@@ -112,6 +115,13 @@ v39 (retrained mouth-outline model): the small model that finds the mouth openin
 - The lower-teeth gap and the front-teeth seam are unchanged or slightly better on four other recordings.
 
 Still known: with your head tilted well down and your mouth wide open, the upper teeth show only as a thin strip under the lip. Even the large reference models label that strip as lip, so the filled tooth can still be missing there. A detector that mirrors your visible real tooth into the gap in that case (`band_rescue`) exists but is off: it only triggered in some frames, so it made a small patch blink. Keeping the camera at eye level avoids the problem.
+
+v40 (wider fills with head-turn correction):
+- **Wider:** the upper fill now also covers the canine gap on the viewer's left (`slot_w` 88, was 66). The lower fill reaches about one tooth further toward the corner (`l_span` 100, was 76).
+- **Head-turn correction:** your side teeth sit further back along the curve of your jaw, so when you turn your head they shift relative to the front teeth. A flat mirror copy then puts them 5–13 px off at the canine. The filter now reads your head angle every frame and corrects for the curve (`arch_on`, `arch_a`).
+- **Measured** on four recordings, as the share of dark spots that your healthy side shows should be tooth: at the upper canine it fell from 91–92% to 9–25%; beyond the old lower fill, from 72–95% to 25–47%; in the existing lower area it also improved a little. The front seam, the lower gap near the middle, and upper dropouts are unchanged. Nothing is painted onto your lips.
+- **Cost:** about 3–4 ms more per frame, roughly 14%. Not yet tested live.
+- **Limit:** the mirror can only copy teeth your healthy side shows in that same frame. When you turn so the damaged side faces the camera, the matching healthy teeth are hidden behind your cheek, and that part stays unfilled.
 
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
