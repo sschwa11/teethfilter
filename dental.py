@@ -301,6 +301,7 @@ class AnchorFill:
         self.mh_area = 0.0
         self.mh_cov = 0.0
         self.mh_n = 0
+        self.mh_rest = 0.0
         self.light_rl = 1.0
         self.lcm_t = None
         self.lcm_b = None
@@ -637,18 +638,23 @@ class AnchorFill:
     def guard_dropout(self, mouth0, cp):
         poly = np.zeros((CH, CW), np.uint8)
         cv2.fillPoly(poly, [np.round(cp[INNER_POLY]).astype(np.int32)], 1)
+        full = float(poly.sum())
+        rest = poly & (1 - self.upper_zone)
+        rest_cov = float(((mouth0 > 0.5) & (rest > 0)).sum()) / max(float(rest.sum()), 1.0)
         poly &= self.upper_zone
         area = float(poly.sum())
         cov = float(((mouth0 > 0.5) & (poly > 0)).sum()) / max(area, 1.0)
         prev = self.mh_prev
         if prev is not None and area > 150:
-            steady = self.drop_lo <= area / max(self.mh_area, 1.0) <= 1.0 / self.drop_lo
-            if steady and self.mh_n < self.drop_hold and self.mh_cov > 0.2 and cov < 0.5 * self.mh_cov:
+            steady = self.drop_lo <= full / max(self.mh_area, 1.0) <= 1.0 / self.drop_lo
+            still_open = rest_cov >= max(0.2, 0.7 * self.mh_rest)
+            if steady and still_open and self.mh_n < self.drop_hold and self.mh_cov > 0.2 and cov < 0.5 * self.mh_cov:
                 self.mh_n += 1
                 lim = cv2.dilate(poly, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))).astype(np.float32)
                 return np.maximum(mouth0, prev * lim * self.upper_zone).astype(np.float32)
         self.mh_prev = mouth0.copy()
-        self.mh_area = area
+        self.mh_area = full
+        self.mh_rest = rest_cov
         self.mh_cov = cov
         self.mh_n = 0
         return mouth0

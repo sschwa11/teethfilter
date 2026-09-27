@@ -102,9 +102,9 @@ v37 (upper teeth flicker, gap between the front teeth):
 
 v38 (tongue flicker): with your tongue raised and touching the backs of your upper teeth, the mouth-outline model sometimes marks only fragments of the opening near the teeth, and some frames it marks none of it. The upper fill then blinked on and off, or was cut into a notch where the tongue was. Two fixes:
 - Tongue-shaped holes in the mouth outline no longer cut the upper fill. The fill covers everything between the top and the bottom of the opening in each column.
-- When the upper part of the opening suddenly nearly disappears while your lip outline stays about the same, the filter keeps the previous frame's opening for up to 10 frames (`drop_hold`).
+- When the band at your upper teeth suddenly nearly disappears while your lip outline stays about the same and the rest of your mouth is still open, the filter keeps the previous frame's opening there for up to 10 frames (`drop_hold`). The "rest still open" check matters: without it the filter painted a tooth sliver onto your lip for a frame when your mouth was closing, because the mouth-outline model sees closing lips a frame before the face landmarks do.
 
-On your tongue recording (00-24-05), complete one-frame dropouts of the upper fill fell from 17 to 3. Frame-to-frame changes in the fill's shape dropped about 15-25% on the talking recordings. Seams and the lower teeth are unchanged.
+On your tongue recording (00-24-05), complete one-frame dropouts of the upper fill fell from 17 to 3. Frame-to-frame changes in the fill's shape there dropped 28%. The other recordings are unchanged, since the hold only kicks in with the tongue up. Seams and the lower teeth are also unchanged.
 
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
