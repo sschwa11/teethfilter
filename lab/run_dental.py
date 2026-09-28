@@ -9,6 +9,10 @@ for key in keys:
     d = dict(np.load(f"cache/{key}.npz", allow_pickle=True))
     cap = cv2.VideoCapture(str(d["path"]))
     af = D.AnchorFill()
+    if os.environ.get("LIVE"):
+        import json
+        af.reset(json.load(open("../settings.json"))["anchor_offset"])
+        af.load_state()
     for o in opts:
         k, v = o.split("="); setattr(af, k, eval(v))
     w = None; ts = []; n = 0

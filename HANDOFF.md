@@ -123,6 +123,11 @@ v40 (wider fills with head-turn correction):
 - **Cost:** about 3–4 ms more per frame, roughly 14%. Not yet tested live.
 - **Limit:** the mirror can only copy teeth your healthy side shows in that same frame. When you turn so the damaged side faces the camera, the matching healthy teeth are hidden behind your cheek, and that part stays unfilled.
 
+v41 (front tooth flicker): the filled front tooth was drawn from a remembered image of your tooth. That memory had become dark and streaky: it was saved darker than your real tooth and brightened back up at the limit (x1.8), so the fill didn't track your real tooth. It showed as a grey block when your lips were nearly closed and your real tooth was in shadow, and as streaks with your teeth together. Now, wherever your real front tooth is visible, the fill copies it directly (mirrored) that frame, and the memory is only used where your real tooth is hidden, e.g. behind your lip (`live_first`). The copy fades out within 7 px of the midline, so the seam stays as before (`lf_seam`). The memory is also saved at its true brightness now.
+- Measured on your two new clips (`lab/pair_flicker.py`), sudden brightness jumps of the fill relative to your real tooth fell 8% on the long clip and 46% on the short one. The fill's glow in a dark slit halved. On three older recordings the jumps fell 11-27%. The front seam is unchanged.
+- Still visible: a thin bright bar for one frame when your mouth first opens after an "O" shape, and the tooth-edge tracking can't get a reading in those frames.
+- Tried and left off: stronger up-down tracking (`y_track`) and fitting the fill's height to your real tooth each frame (`vfit`); neither measurably helped.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).

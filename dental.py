@@ -95,6 +95,7 @@ def parabolic(v, i):
 class EdgeTracker:
     def __init__(self, x0, b0, crown=24, search=12, width=30):
         self.x0, self.b0 = x0, b0
+        self.y_hi = 10
         self.crown, self.search, self.width = crown, search, width
         self.off = np.zeros(2)
         self.n = 0
@@ -142,7 +143,7 @@ class EdgeTracker:
             return None
         conf = float(seg[j] / (2 * k) / max(contrast, 1))
         cols = slice(int(xe + 4), int(xe + 4 + min(24, self.width - 6)))
-        vr0, vr1 = int(max(bp - (24 if self.n < 40 else 12), 0)), int(min(bp + 10, CH - 1))
+        vr0, vr1 = int(max(bp - (24 if self.n < 40 else 12), 0)), int(min(bp + self.y_hi, CH - 1))
         ye = None
         q = L[vr0:vr1, cols].mean(1)
         if q.size > 6:
@@ -231,6 +232,20 @@ class AnchorFill:
         self.l_need = 1
         self.keep_inner = True
         self.seam_max = 16.0
+        self.vfit = False
+        self.live_first = True
+        self.lf_lo = 0.55
+        self.lf_hi = 0.85
+        self.lf_seam = 7.0
+        self.y_track = False
+        self.k_y = 0.6
+        self.y_gate = 4.0
+        self.y_step = 2.0
+        self.vfit_k = 0.7
+        self.vfit_w = 34
+        self.vfit_lo = -6.0
+        self.vfit_hi = 14.0
+        self.vfit_hold = 8
         self.tongue_fill = True
         self.drop_hold = 10
         self.drop_lo = 0.7
@@ -379,11 +394,15 @@ class AnchorFill:
         self.prev_mouth = None
         self.reg_ok = False
         self.recent = []
+        self.recent_y = []
+        self.out_y = []
         self.lax = None
         self.lax_hist = []
         self.w_s = None
         self.lim_slot_c = None
         self.seam_s = 0.0
+        self.vsh = 0.0
+        self.vsh_age = 99
         self.mh_prev = None
         self.mh_area = 0.0
         self.mh_cov = 0.0
@@ -406,7 +425,8 @@ class AnchorFill:
     def save_state(self, path=STATE_PATH):
         if self.st_tex is None or (self.st_seen > 0.3).sum() < 200:
             return False
-        np.savez_compressed(path, st_tex=self.st_tex.astype(np.float16), st_seen=self.st_seen.astype(np.float16),
+        tex = self.st_tex * (self.st_gain[None, None, :] if self.st_gain is not None else 1.0)
+        np.savez_compressed(path, st_tex=np.clip(tex, 0, 255).astype(np.float16), st_seen=self.st_seen.astype(np.float16),
                             st_sil=self.st_sil.astype(np.float16), roi=np.array(self.roi))
         return True
 
@@ -487,6 +507,7 @@ class AnchorFill:
         hp = L0 - cv2.GaussianBlur(L0, (0, 0), 3.0)
         shift = self.register(hp, mouth0) if self.use_reg else None
         self.prev_hp, self.prev_mouth, self.prev_L = hp, mouth0, L0
+        self.et.y_hi = 14 if self.y_track else 10
         meas = self.et.measure(L0, mouth0)
         base = np.array([self.et.x0, self.et.b0])
         pred = None
@@ -544,6 +565,29 @@ class AnchorFill:
             step = self.max_step * (2.0 if self.relock_t > 0 else 1.0)
             self.delta[0] = prev[0] + float(np.clip(self.delta[0] - prev[0], -step, step))
         self.relock_t = max(self.relock_t - 1, 0)
+        if self.y_track and pred is not None:
+            self.track_y(meas, base, pred)
+
+    def track_y(self, meas, base, pred):
+        prev_y = float(pred[1])
+        y_m = None
+        if meas is not None and meas["y"] is not None and meas["conf"] >= 0.06:
+            y_m = float(meas["y"] - base[1])
+        if y_m is not None:
+            med = float(np.median(self.recent_y)) if len(self.recent_y) >= 5 else None
+            ok = med is None or abs(y_m - med) <= self.y_gate
+            if not ok:
+                self.out_y.append(y_m)
+                if len(self.out_y) >= 3 and np.ptp(self.out_y[-3:]) < 3:
+                    ok = True
+                    self.recent_y = list(self.out_y[-3:])
+            if ok:
+                self.out_y = []
+                self.recent_y = (self.recent_y + [y_m])[-self.robust_n:]
+                target = self.k_y * y_m + (1 - self.k_y) * prev_y
+                self.delta[1] = prev_y + float(np.clip(target - prev_y, -self.y_step, self.y_step))
+                return
+        self.delta[1] = prev_y
 
     def hold(self, raw, prev, limit, rise=0.6, fall=0.34):
         if prev is None:
@@ -635,8 +679,16 @@ class AnchorFill:
             st = self.stable_render(rows, gy, body, cap)
             if st is not None:
                 tex, cover, has_st = st
+                if self.vfit:
+                    tex, cover = self.fit_vertical(tex, cover, raw_bot, has & has_st & at_start, mouth_d, rows)
                 if self.live_ext > 0:
-                    tex, cover = self.extend_live(tex, cover, live, raw_bot, cap + self.live_ext, has & has_st, rows, gy)
+                    tex, cover = self.extend_live(tex, cover, live, raw_bot, cap + self.live_ext + max(self.vsh, 0.0), has & has_st, rows, gy)
+                if self.live_first:
+                    w = np.clip((mouth_d - self.lf_lo) / (self.lf_hi - self.lf_lo), 0, 1).astype(np.float32)
+                    xo = np.arange(c0, c1, dtype=np.float32) - self.x_mid
+                    w = w * np.clip((-xo - self.lf_seam) / 3.0, 0, 1)[None, :]
+                    w = cv2.GaussianBlur(w, (0, 0), 1.0)[..., None]
+                    tex = (w * live + (1 - w) * tex).astype(np.float32)
                 mt = self.extend_dark(mouth[R], L[R], lt, inb)
                 if self.tongue_fill:
                     full = mouth[:, c0:c1].copy()
@@ -728,6 +780,31 @@ class AnchorFill:
         conf = np.clip(den / 0.2, 0, 1)
         new = 1 + (num / np.maximum(den, 1e-6) - 1) * conf
         self.st_shade = (0.5 * self.st_shade + 0.5 * np.clip(new, 0.35, 1.3)).astype(np.float32)
+
+    def fit_vertical(self, tex, cover, raw_bot, ok, mouth_d, rows):
+        h, w = cover.shape
+        r0 = int(rows[0, 0])
+        c = cover > 0.5
+        sb = np.where(c.any(0), r0 + h - 1 - np.argmax(c[::-1], 0), -1).astype(np.float32)
+        below = np.clip(raw_bot.astype(np.int32) + 2 - r0, 0, h - 1)
+        open_below = mouth_d[below, np.arange(w)] > 0.7
+        xs = np.arange(w) + self.roi[2] - self.x_mid
+        near = (xs > -self.vfit_w) & (xs < -2)
+        good = ok & near & (sb > 0) & open_below & (raw_bot < r0 + h - 2)
+        if good.sum() >= 6:
+            m = float(np.clip(np.median((raw_bot - sb)[good]), self.vfit_lo, self.vfit_hi))
+            self.vsh += self.vfit_k * (m - self.vsh)
+            self.vsh_age = 0
+        else:
+            self.vsh_age += 1
+            if self.vsh_age > self.vfit_hold:
+                self.vsh *= 0.9
+        if abs(self.vsh) < 0.25:
+            return tex, cover
+        mt = np.float32([[1, 0, 0], [0, 1, self.vsh]])
+        tex = cv2.warpAffine(tex, mt, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+        cover = cv2.warpAffine(cover.astype(np.float32), mt, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        return tex, cover
 
     def extend_live(self, tex, cover, live, raw_bot, cap2, ok, rows, gy):
         sb = np.where((cover > 0.5).any(0), rows[-1, 0] - np.argmax((cover > 0.5)[::-1], 0), 0).astype(np.float32)
