@@ -120,13 +120,19 @@ v40 (wider fills with head-turn correction):
 - **Wider:** the upper fill now also covers the canine gap on the viewer's left (`slot_w` 88, was 66). The lower fill reaches about one tooth further toward the corner (`l_span` 100, was 76).
 - **Head-turn correction:** your side teeth sit further back along the curve of your jaw, so when you turn your head they shift relative to the front teeth. A flat mirror copy then puts them 5–13 px off at the canine. The filter now reads your head angle every frame and corrects for the curve (`arch_on`, `arch_a`).
 - **Measured** on four recordings, as the share of dark spots that your healthy side shows should be tooth: at the upper canine it fell from 91–92% to 9–25%; beyond the old lower fill, from 72–95% to 25–47%; in the existing lower area it also improved a little. The front seam, the lower gap near the middle, and upper dropouts are unchanged. Nothing is painted onto your lips.
-- **Cost:** about 3–4 ms more per frame, roughly 14%. Not yet tested live.
+- **Cost:** about 3–4 ms more per frame, roughly 14%. Live speed is unchanged (see v41).
 - **Limit:** the mirror can only copy teeth your healthy side shows in that same frame. When you turn so the damaged side faces the camera, the matching healthy teeth are hidden behind your cheek, and that part stays unfilled.
 
 v41 (front tooth flicker): the filled front tooth was drawn from a remembered image of your tooth. That memory had become dark and streaky: it was saved darker than your real tooth and brightened back up at the limit (x1.8), so the fill didn't track your real tooth. It showed as a grey block when your lips were nearly closed and your real tooth was in shadow, and as streaks with your teeth together. Now, wherever your real front tooth is visible, the fill copies it directly (mirrored) that frame, and the memory is only used where your real tooth is hidden, e.g. behind your lip (`live_first`). The copy fades out within 7 px of the midline, so the seam stays as before (`lf_seam`). The memory is also saved at its true brightness now.
 - Measured on your two new clips (`lab/pair_flicker.py`), sudden brightness jumps of the fill relative to your real tooth fell 8% on the long clip and 46% on the short one. The fill's glow in a dark slit halved. On three older recordings the jumps fell 11-27%. The front seam is unchanged.
 - Still visible: a thin bright bar for one frame when your mouth first opens after an "O" shape, and the tooth-edge tracking can't get a reading in those frames.
 - Tried and left off: stronger up-down tracking (`y_track`) and fitting the fill's height to your real tooth each frame (`vfit`); neither measurably helped.
+- Tested live on 28 Sep (recording 14-26-26): the live output matches the offline replay, and brightness jumps were about 25% fewer than v40 would give on the same clip. Speed was 17.5 fps while recording, the usual 17–21 fps (recording saves two videos at once).
+
+v42 (grey patch when your lips are nearly closed): when your lower lip rises over your teeth, only a dark slit is left where the missing teeth are, and your real tooth next to it is dim. The fill stopped at the edge of the detected opening, so the slit's soft dark edge stayed around it: for 1–3 frames the fill looked like a flat grey patch with a dark outline. Now, in those nearly closed frames, the fill's edge blends into your lips according to how dark each edge pixel is, the way your real tooth meets your lips (`soft_edge`). It never makes a spot brighter than the matching spot on your real side or the nearby lip, and open-mouth frames are unchanged (there the dark band under your upper lip is the lip's own shadow).
+- Measured (`lab/pair_flicker.py`): on the new recording, frames where the fill pops in or out next to your real tooth fell from 16 to 9. On three older recordings: 4 to 2, 4 to 3, 3 to 3. Brightness jumps, the front seam and the lower teeth are unchanged (within ±3%). Cost: about 1 ms per frame on average.
+- Tried and left off: filling those frames with a straight mirror of your real side (it smears your lip's bright highlight into the gap), and filling the dark wedge under a slanted fill (it could only half-fill it, leaving notches).
+- Still visible: in those frames the fill is still a little greyer than your real tooth, which picks up pink from your lips, and when the fill's bottom edge is slanted a dark wedge can remain under it.
 
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
@@ -144,7 +150,7 @@ Speed: ~28.5 fps with a 30 fps camera. Face tracking runs on its own thread (`Ca
 5. **Lower fill** occasionally leaves a bright, flat "slab" at the lower lip line (`lower_fill` in `dental.py`).
 6. **Short crescents:** when only a sliver of the donor tooth is visible, the fill is a thin bright crescent.
 7. **Tracking re-lock pops** after the mouth opens. Hidden-frame error is ~2.3 px (`lab/align_eval.py`).
-8. Not yet tested **live on your webcam and in OBS**. Only recordings were used.
+8. **Recording costs speed:** with `r` on, the filter runs at 17–21 fps because it saves two videos at once.
 
 ## 5. Recording better data (biggest easy win)
 

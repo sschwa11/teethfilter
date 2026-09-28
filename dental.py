@@ -237,6 +237,11 @@ class AnchorFill:
         self.lf_lo = 0.55
         self.lf_hi = 0.85
         self.lf_seam = 7.0
+        self.soft_edge = True
+        self.se_r = 8
+        self.se_h = 20.0
+        self.se_open = 32.0
+        self.se_m = 0.8
         self.y_track = False
         self.k_y = 0.6
         self.y_gate = 4.0
@@ -1237,6 +1242,68 @@ class AnchorFill:
         alpha[y0:y1, x0:x1] *= cv2.GaussianBlur(g, (0, 0), 1.2)
         return alpha
 
+    def mix_edge(self, crop, L, tex, alpha, mouth, lim):
+        if self.lm_open >= self.se_open + 8:
+            return tex, alpha
+        core = alpha > 0.5
+        ry, cx = np.flatnonzero(core.any(1)), np.flatnonzero(core.any(0))
+        if ry.size == 0:
+            return tex, alpha
+        r = self.se_r
+        y0, y1 = max(ry[0] - r - 10, 0), min(ry[-1] + r + 11, CH)
+        x0, x1 = max(cx[0] - r - 10, 0), min(cx[-1] + r + 11, CW)
+        B = (slice(y0, y1), slice(x0, x1))
+        m = mouth[B]
+        mh = cv2.blur((m > 0.5).sum(0).astype(np.float32).reshape(1, -1), (9, 1)).ravel()
+        slit = np.clip((self.se_h + 6 - mh) / 6.0, 0, 1) * (lim[B].max(0) > 0.5)
+        slit *= float(np.clip((self.se_open + 8 - self.lm_open) / 8.0, 0, 1))
+        a, Lr, c = alpha[B], L[B], core[B]
+        deep = a > 0.9
+        if slit.max() <= 0 or c.sum() < 30 or deep.sum() < 20:
+            return tex, alpha
+        raw = crop[B].astype(np.float32)
+        hl = float(np.percentile(Lr[deep], 20))
+        hole = raw[deep & (Lr <= hl + 3)].mean(0).astype(np.float32)
+        dist = cv2.distanceTransform((~c).astype(np.uint8), cv2.DIST_L2, 3)
+        lip = ((m < 0.1) & (Lr > hl + 25) & (dist >= 6) & (dist <= r + 8)).astype(np.float32)
+        wl = cv2.GaussianBlur(lip, (0, 0), 4.0)
+        lip_l = cv2.GaussianBlur(Lr * lip, (0, 0), 4.0) / np.maximum(wl, 1e-4)
+        span = lip_l - hl
+        h = np.where((wl > 0.03) & (span > 20), np.clip((lip_l - Lr) / np.maximum(span, 1.0), 0, 1), 0.0).astype(np.float32)
+        z = c.astype(np.uint8)
+        reach = ((h > 0.08) & (m < self.se_m)).astype(np.uint8) | z
+        seen = z.copy()
+        k3 = np.ones((3, 3), np.uint8)
+        for _ in range(r):
+            z = cv2.dilate(z, k3) & reach
+            seen += z
+        inv = (seen == 0).astype(np.uint8)
+        _, lab, st, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+        hh, ww = inv.shape
+        inner = (st[:, 4] <= 25) & (st[:, 0] > 0) & (st[:, 1] > 0) & (st[:, 0] + st[:, 2] < ww) & (st[:, 1] + st[:, 3] < hh)
+        inner[0] = False
+        seen = np.where(inner[lab] & (inv > 0), 3, seen)
+        blocked = ((h > 0.3) & (seen == 0)).astype(np.uint8)
+        near = np.clip(cv2.distanceTransform(1 - blocked, cv2.DIST_L2, 3) / 3.0, 0, 1)
+        wz = np.minimum(seen, 3).astype(np.float32) / 3.0 * near
+        dm = deep.astype(np.float32)
+        wd = cv2.GaussianBlur(dm, (0, 0), 3.0)
+        fill = cv2.GaussianBlur(tex[B] * dm[..., None], (0, 0), 3.0) / np.maximum(wd, 1e-6)[..., None]
+        xs = np.arange(x0, x1, dtype=np.float64) - self.x_mid
+        wx = float(self.w_s[0]) if (self.arch_on and self.w_s is not None) else 0.0
+        xd = np.clip(np.round(self.x_mid + xs - 2 * self.arch_solve(xs, self.arch_a, wx)), 0, CW - 1).astype(np.int32)
+        fl = cv2.cvtColor(np.clip(fill, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+        room = np.clip(np.minimum(L[y0:y1][:, xd], lip_l) - ((1 - a) * Lr + a * fl), 0, None) / np.maximum(fl - hl, 1.0)
+        corr = (np.minimum((1 - a) * h * wz * (wd > 1e-3), room) * slit[None, :]).astype(np.float32)
+        if not corr.any():
+            return tex, alpha
+        a2 = a + corr
+        t2 = (tex[B] * a[..., None] + corr[..., None] * (raw + fill - hole)) / np.maximum(a2, 1e-4)[..., None]
+        tex[B] = np.where((a2 > 1e-3)[..., None], np.clip(t2, 0, 255), tex[B])
+        alpha = alpha.copy()
+        alpha[B] = a2
+        return tex, alpha
+
     def process(self, frame, pts):
         pose = self.df.pose(pts)
         w = np.clip(self.head_w(pose), -0.4, 0.4)
@@ -1275,7 +1342,10 @@ class AnchorFill:
                 r0, r1, c0, c1 = self.roi
                 held = (alpha_u[r0:r1, c0:c1] > raw_u[r0:r1, c0:c1] + 0.05) & (self.mem_w > 0.35)
                 tex_u[r0:r1, c0:c1] = np.where(held[..., None], self.mem, tex_u[r0:r1, c0:c1])
-            tex, alpha = tex_u, alpha_u
+            alpha = alpha_u
+            if self.soft_edge:
+                tex_u, alpha = self.mix_edge(crop, L, tex_u, alpha_u, mouth, np.asarray(lim_slot, np.float32))
+            tex = tex_u
         else:
             self.au_prev = None
         if self.lower and gate > 0:
