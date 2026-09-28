@@ -134,6 +134,10 @@ v42 (grey patch when your lips are nearly closed): when your lower lip rises ove
 - Tried and left off: filling those frames with a straight mirror of your real side (it smears your lip's bright highlight into the gap), and filling the dark wedge under a slanted fill (it could only half-fill it, leaving notches).
 - Still visible: in those frames the fill is still a little greyer than your real tooth, which picks up pink from your lips, and when the fill's bottom edge is slanted a dark wedge can remain under it.
 
+v43 (rounded "oh" mouth): with your lips pushed forward in an "oh", your gum and the stubs of the missing teeth show under the upper lip, lit to a medium grey-pink. The mouth-outline model (and the large reference models it learned from) is only about half sure that band is mouth, so the fill stopped below it: a thin sliver, a "U" shape or a small blob next to your real tooth, with the gap still showing. Now, when your mouth is narrow and tall (the pucker shape), the fill extends up through that uncertain band to the lip line wherever it's clearly darker than your real tooth (`ramp_ext`). It only switches on for that shape; on four older recordings it changes 2 frames in total.
+- Measured on the new recording (`lab/mirror_cover.py`: how much of your mirrored real tooth the fill covers): in the "oh" stretch it rose from 66% to 83%, and frames less than half covered fell from 16 to 3. Flicker and the front seam are unchanged.
+- Still visible: over the stubs the fill is a smooth band rather than tooth-shaped, and occasionally there's a small spike or bump at its edge.
+
 At thumbnail size the judges mostly call ties. At full size, v23 beat v22 for naturalness 10 vs 1 (19 ties), because the dark midline crack is gone.
 
 \*v13 also counts lower-teeth gaps. Head to head on frames where the lower fill is active, lower on beat lower off 89% of the time (naturalness 5.6 vs 4.0).

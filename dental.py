@@ -237,6 +237,12 @@ class AnchorFill:
         self.lf_lo = 0.55
         self.lf_hi = 0.85
         self.lf_seam = 7.0
+        self.ramp_ext = True
+        self.ramp_w = 8
+        self.ramp_gap = 30.0
+        self.ramp_wmax = 180.0
+        self.ramp_r0 = 0.28
+        self.pucker = 0.0
         self.soft_edge = True
         self.se_r = 8
         self.se_h = 20.0
@@ -694,7 +700,7 @@ class AnchorFill:
                     w = w * np.clip((-xo - self.lf_seam) / 3.0, 0, 1)[None, :]
                     w = cv2.GaussianBlur(w, (0, 0), 1.0)[..., None]
                     tex = (w * live + (1 - w) * tex).astype(np.float32)
-                mt = self.extend_dark(mouth[R], L[R], lt, inb)
+                mt = self.extend_dark(mouth[R], L[R], lt, inb, ramp=self.ramp_ext and self.pucker > 0.5)
                 if self.tongue_fill:
                     full = mouth[:, c0:c1].copy()
                     full[r0:r1] = mt
@@ -972,7 +978,7 @@ class AnchorFill:
         alpha = alpha * np.clip(edge + 0.5 - np.arange(ww, dtype=np.float32), 0, 1)[None, :]
         return tex, alpha, edge
 
-    def extend_dark(self, mouth, L, lt, inb, reach=12):
+    def extend_dark(self, mouth, L, lt, inb, reach=12, ramp=False):
         if lt <= 0:
             return mouth.copy()
         hh, ww = mouth.shape
@@ -996,7 +1002,31 @@ class AnchorFill:
             rows = np.arange(hh)[:, None]
             fill = ext_cols[None, :] & (rows >= (top - n_ext)[None, :]) & (rows <= (top + 6)[None, :])
             out = np.where(fill, np.maximum(out, 0.9), out).astype(np.float32)
+        if ramp:
+            out = self.extend_ramp(out, mouth, L, lt)
         return out
+
+    def extend_ramp(self, out, mouth, L, lt):
+        hh, ww = mouth.shape
+        conf = mouth > 0.5
+        has = conf.sum(0) >= 4
+        below = ~has & (mouth[-1] > 0.3)
+        top = np.where(has, np.argmax(conf, 0), hh - 1)
+        has |= below
+        soft = mouth > 0.05
+        t05 = np.where(soft.any(0), np.argmax(soft, 0), hh)
+        wide = (has & (top - t05 >= self.ramp_w)).astype(np.uint8).reshape(1, -1)
+        wide = cv2.morphologyEx(wide, cv2.MORPH_OPEN, np.ones((1, 5), np.uint8)).ravel() > 0
+        if not wide.any():
+            return out
+        sel = np.flatnonzero(wide)
+        t0 = t05.astype(np.float32)
+        t0[sel] = smooth_cols(t0[sel], 5)
+        rows = np.arange(hh)[:, None]
+        span = wide[None, :] & (rows >= np.ceil(t0 + 2)[None, :]) & (rows <= top[None, :])
+        mean_l = (L * span).sum(0) / np.maximum(span.sum(0), 1)
+        fill = span & (mean_l < lt - self.ramp_gap)[None, :]
+        return np.where(fill, np.maximum(out, 0.9), out).astype(np.float32)
 
     def update_memory(self, live, mouth_d, vis_d, top_d, bot, live_ok, rows):
         crown = vis_d & (mouth_d > 0.8) & (rows >= top_d[None, :]) & (rows < bot[None, :]) & live_ok[None, :]
@@ -1323,6 +1353,8 @@ class AnchorFill:
         mouth = shift_img(mouth0, self.delta, cv2.BORDER_CONSTANT)
         cp = cp0 - self.delta
         self.lm_open = float(np.linalg.norm(cp[13] - cp[14]))
+        width = max(float(np.linalg.norm(cp[78] - cp[308])), 1.0)
+        self.pucker = float(np.clip((self.ramp_wmax - width) / 15.0, 0, 1) * np.clip((self.lm_open / width - self.ramp_r0) / 0.06, 0, 1))
         yu = np.interp(np.arange(CW), *zip(*sorted(cp[UPPER_INNER].tolist())))
         yl = np.interp(np.arange(CW), *zip(*sorted(cp[LOWER_INNER].tolist())))
         gate = float(np.clip(self.locks / 3.0, 0, 1))
