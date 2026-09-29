@@ -433,6 +433,21 @@ class AnchorFill:
         self.st_shade = None
         self.st_gap = 99
 
+    def clear_holds(self):
+        self.au_prev = None
+        self.al_prev = None
+        self.l_hits = 0
+        self.lcm_t = None
+        self.lcm_b = None
+        self.lcm_age = None
+        self.lax = None
+        self.lax_hist = []
+        self.mh_prev = None
+        self.mh_n = 0
+        self.band_mem = None
+        self.w_s = None
+        self.seam_s = 0.0
+
     def save_state(self, path=STATE_PATH):
         if self.st_tex is None or (self.st_seen > 0.3).sum() < 200:
             return False

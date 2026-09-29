@@ -15,7 +15,8 @@ Keys that matter for the anchor method:
 
 | Key | Action |
 |---|---|
-| `f` | filter on/off (before/after check) |
+| `f` | filter on/off (before/after check); only while the preview window has focus |
+| `Ctrl+Alt+F` | filter on/off from any app, e.g. during a Zoom/Teams call. Off = your raw camera image, with face tracking paused. Change it with `run.bat --hotkey ctrl+alt+t` (modifiers + a letter, digit or F-key), or `--hotkey none` |
 | `u` | upper-arch fill on/off |
 | `l` | lower-arch fill on/off |
 | `d` | debug: red tint shows the replaced pixels |

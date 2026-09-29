@@ -223,6 +223,7 @@ class Config:
         self.source = "self"
         self.auto = a.auto
         self.camera_name = ""
+        self.hotkey = ""
 
 
 def smooth_points(st, pts):
@@ -1202,9 +1203,77 @@ def choose_camera(args, cams):
             return choice
 
 
+class GlobalHotkey:
+    MODS = {"ctrl": 0x2, "control": 0x2, "alt": 0x1, "shift": 0x4, "win": 0x8}
+
+    def __init__(self, spec, callback):
+        self.mods, self.vk = self.parse(spec)
+        self.callback = callback
+        self.thread_id = None
+        self.ok = False
+        self.ready = threading.Event()
+        threading.Thread(target=self.run, daemon=True).start()
+        self.ready.wait(2.0)
+
+    @classmethod
+    def parse(cls, spec):
+        parts = [p.strip().lower() for p in spec.split("+") if p.strip()]
+        mods = 0
+        for p in parts[:-1]:
+            mods |= cls.MODS[p]
+        key = parts[-1]
+        if len(key) == 1 and key.isalnum():
+            return mods, ord(key.upper())
+        if key[0] == "f" and key[1:].isdigit() and 1 <= int(key[1:]) <= 24:
+            return mods, 0x6F + int(key[1:])
+        raise ValueError(spec)
+
+    def run(self):
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        self.thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        self.ok = bool(user32.RegisterHotKey(None, 1, self.mods | 0x4000, self.vk))
+        self.ready.set()
+        if not self.ok:
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x0312:
+                self.callback()
+        user32.UnregisterHotKey(None, 1)
+
+    def stop(self):
+        if self.ok:
+            import ctypes
+            ctypes.windll.user32.PostThreadMessageW(self.thread_id, 0x0012, 0, 0)
+
+
+def start_hotkey(spec, cfg):
+    if spec.lower() == "none" or sys.platform != "win32":
+        return None
+
+    def toggle():
+        cfg.enabled = not cfg.enabled
+        print(f"Filter {'ON' if cfg.enabled else 'OFF'}")
+
+    try:
+        hotkey = GlobalHotkey(spec, toggle)
+    except (KeyError, ValueError, IndexError):
+        print(f"Unrecognized --hotkey '{spec}'. Use modifiers + one letter, digit or F-key, e.g. ctrl+alt+f or f9.")
+        return None
+    if not hotkey.ok:
+        print(f"Could not register the hotkey {spec}; another app may be using it. Pick another with --hotkey, e.g. ctrl+alt+t.")
+        return None
+    cfg.hotkey = spec
+    print(f"Press {spec} in any app to turn the filter off/on.")
+    return hotkey
+
+
 def draw_hud(img, cfg, fps, has_ref, recording):
+    toggle = f"[f / {cfg.hotkey}]" if cfg.hotkey else "[f]"
     lines = [
-        f"filter {'ON' if cfg.enabled else 'OFF'} [f]   debug [d]   hud [h]   record {'ON' if recording else 'off'} [r]   quit [q]",
+        f"filter {'ON' if cfg.enabled else 'OFF'} {toggle}   debug [d]   hud [h]   record {'ON' if recording else 'off'} [r]   quit [q]",
         f"max gap {cfg.max_gap:.2f} [ [ / ] ]   min gap {cfg.min_gap:.3f} [ - / = ]   extent {cfg.extent:.2f} [ , / . ]",
         f"upper {'on' if cfg.upper else 'off'} [u]   lower {'on' if cfg.lower else 'off'} [l]   source {cfg.source} [p]{'' if has_ref else ' (no --ref)'}",
         f"method: {cfg.method}   auto-calibrate {'ON' if cfg.auto else 'off'} [a]   fill: {cfg.fill}{'' if cfg.ai is not None else ' (no AI model)'} [m]   camera: {cfg.camera_name} [c = next]",
@@ -1253,6 +1322,7 @@ def main():
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--hotkey", type=str, default="ctrl+alt+f")
     ap.add_argument("--ref", type=str, default=None)
     ap.add_argument("--dark", type=float, default=None)
     ap.add_argument("--extent", type=float, default=None)
@@ -1380,6 +1450,8 @@ def main():
     rec = None
     noface = 0
     grab = Capture(cap, mp, lm, cfg)
+    hotkey = start_hotkey(args.hotkey, cfg)
+    was_enabled = cfg.enabled
     seq = -1
     while True:
         seq, item = grab.get(seq)
@@ -1389,6 +1461,9 @@ def main():
             continue
         frame, pts = item
         out, dbg = frame, None
+        if cfg.enabled and not was_enabled and anchor is not None:
+            anchor.clear_holds()
+        was_enabled = cfg.enabled
         if cfg.enabled:
             noface = 0 if pts is not None else noface + 1
             if pts is not None:
@@ -1396,6 +1471,8 @@ def main():
             else:
                 st.pts = None
                 st.alpha = None
+        else:
+            noface = 0
         ok, jpg = cv2.imencode(".jpg", out, enc)
         if ok:
             hub.put(jpg.tobytes())
@@ -1410,11 +1487,14 @@ def main():
             roi[..., 2] = np.clip(roi[..., 2] + a * 200, 0, 255)
             view[y0:y0 + h, x0:x0 + w] = roi.astype(np.uint8)
             cv2.rectangle(view, (x0, y0), (x0 + w, y0 + h), (0, 255, 255), 1)
-        if cfg.hud or cfg.auto or rec is not None or noface > 15:
+        if cfg.hud or cfg.auto or rec is not None or noface > 15 or not cfg.enabled:
             view = view.copy() if view is out else view
         if cfg.hud:
             draw_hud(view, cfg, fps, ref is not None, rec is not None)
-        if noface > 15:
+        if not cfg.enabled:
+            keys = f"[f] or {cfg.hotkey}" if cfg.hotkey else "[f]"
+            draw_label(view, f"FILTER OFF - {keys} to turn it back on" + ("   REC [r] to stop" if rec is not None else ""), (0, 200, 255))
+        elif noface > 15:
             draw_label(view, "NO FACE DETECTED - keep your whole face (eyes to chin) in frame; the filter is paused", (0, 0, 255))
         elif cfg.auto:
             draw_label(view, f"AUTO-CALIBRATING  extent {cfg.extent:.2f}  ({st.calib_frames} samples)  [a] to stop", (0, 220, 255))
@@ -1498,6 +1578,8 @@ def main():
     if rec is not None:
         rec.close()
     save_settings(cfg, st, anchor)
+    if hotkey is not None:
+        hotkey.stop()
     grab.stop()
     grab.cap.release()
     lm.close()
